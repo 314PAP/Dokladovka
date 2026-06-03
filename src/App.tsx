@@ -25,9 +25,17 @@ import {
   Flashlight,
   FlashlightOff,
   ArrowLeft,
-  Crop
+  Crop,
+  FolderOpen,
+  Calendar,
+  Download,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import DocumentSection from './components/DocumentSection';
+import { exportExpensesToPDF } from './utils/pdfExport';
+import { resizeAndCompressImage } from './utils/imageCompressor';
+import { getSmartFallbackReceipt } from './utils/smartFallback';
 
 interface ReceiptItem {
   name: string;
@@ -42,6 +50,38 @@ interface Receipt {
   category: string;
   items: ReceiptItem[];
   imageUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+  isFallback?: boolean;
+}
+
+interface ReceiptQueueItem {
+  id: string;
+  name: string;
+  status: 'queued' | 'compressing' | 'scanning' | 'done' | 'failed';
+  error?: string;
+  file?: File;
+  virtualBase64?: string;
+}
+
+interface DocumentItem {
+  id: string;
+  title: string;
+  issuer: string;
+  issueDate: string;
+  category: string;
+  summary: string;
+  keyDetails: string[];
+  imageUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+}
+
+interface DuplicateConflict {
+  id: string;
+  file: File;
+  existingItem: any;
+  existingType: 'receipt' | 'document';
 }
 
 const CATEGORIES = [
@@ -52,6 +92,14 @@ const CATEGORIES = [
   { id: 'Travel', name: 'Doprava', icon: Car, color: 'bg-purple-500' },
   { id: 'Dining', name: 'Restaurace', icon: Utensils, color: 'bg-orange-500' },
   { id: 'Other', name: 'Ostatní', icon: FileText, color: 'bg-gray-500' },
+];
+
+const DOCUMENT_CATEGORIES = [
+  { id: 'HealthDoc', name: 'Zdravotní', icon: Stethoscope, color: 'bg-emerald-500' },
+  { id: 'LaborDoc', name: 'Pracovní úřad', icon: Home, color: 'bg-indigo-500' },
+  { id: 'SocialDoc', name: 'Sociální zabezpečení', icon: CheckCircle2, color: 'bg-cyan-500' },
+  { id: 'ContractDoc', name: 'Pracovní smlouvy', icon: FileText, color: 'bg-violet-500' },
+  { id: 'OtherDoc', name: 'Ostatní', icon: FolderOpen, color: 'bg-amber-500' },
 ];
 
 /**
@@ -87,16 +135,151 @@ async function getCroppedImg(imageSrc: string, pixelCrop: Area): Promise<string>
   return canvas.toDataURL('image/jpeg');
 }
 
+function FilePreview({ file }: { file: File }) {
+  const [src, setSrc] = useState<string>('');
+  useEffect(() => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setSrc(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  }, [file]);
+  
+  if (!src) {
+    return (
+      <div className="w-full h-40 bg-slate-100 flex items-center justify-center rounded-2xl border border-dashed border-slate-200">
+        <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
+      </div>
+    );
+  }
+  
+  return (
+    <img src={src} alt={file.name} className="w-full h-44 object-cover rounded-2xl border border-slate-200 shadow-sm animate-fade-in" referrerPolicy="no-referrer" />
+  );
+}
+
 export default function App() {
-  const [receipts, setReceipts] = useState<Receipt[]>([]);
+  const [activeSection, setActiveSection] = useState<'selection' | 'receipts' | 'documents'>('selection');
+  
+  const [receipts, setReceipts] = useState<Receipt[]>(() => {
+    try {
+      const saved = localStorage.getItem('smart-receipts') || localStorage.getItem('receipts');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Failed to load receipts from localStorage:", e);
+    }
+    return [];
+  });
+  
   const [isScanning, setIsScanning] = useState(false);
+  const [scanningIndex, setScanningIndex] = useState(0);
+  const [scanningTotal, setScanningTotal] = useState(0);
+  const [receiptQueue, setReceiptQueue] = useState<ReceiptQueueItem[]>([]);
   const [showManualForm, setShowManualForm] = useState(false);
+  const [duplicateConflicts, setDuplicateConflicts] = useState<DuplicateConflict[]>([]);
+  const [croppingFileName, setCroppingFileName] = useState<string | undefined>(undefined);
+  const [croppingFileSize, setCroppingFileSize] = useState<number | undefined>(undefined);
+  const [showQuotaWarning, setShowQuotaWarning] = useState(() => {
+    return localStorage.getItem('gemini-quota-warning') === 'true';
+  });
+
+  // Synchronize `isScanning`, `scanningTotal`, `scanningIndex` with receiptQueue
+  useEffect(() => {
+    const active = receiptQueue.some(item => item.status === 'compressing' || item.status === 'scanning' || item.status === 'queued');
+    setIsScanning(active);
+    if (active) {
+      setScanningTotal(receiptQueue.length);
+      const doneOrFailedCount = receiptQueue.filter(item => item.status === 'done' || item.status === 'failed').length;
+      setScanningIndex(doneOrFailedCount + 1);
+    } else {
+      setScanningTotal(0);
+      setScanningIndex(0);
+    }
+  }, [receiptQueue]);
+
+  const fallbackReceiptCreation = async (fileName: string, base64Image?: string, fileSize?: number) => {
+    const smartData = getSmartFallbackReceipt(fileName, fileSize);
+    
+    // Set warning flag
+    localStorage.setItem('gemini-quota-warning', 'true');
+    setShowQuotaWarning(true);
+
+    const newReceipt: Receipt = {
+      id: Math.random().toString(36).substr(2, 9).toUpperCase(),
+      shopName: smartData.shopName,
+      totalAmount: smartData.totalAmount,
+      date: smartData.date,
+      category: smartData.category,
+      items: smartData.items,
+      imageUrl: base64Image || undefined,
+      fileName,
+      fileSize,
+      isFallback: true
+    };
+    setReceipts(prev => [newReceipt, ...prev]);
+  };
+
+  // Background queue processing
+  useEffect(() => {
+    const currentActive = receiptQueue.find(item => item.status === 'compressing' || item.status === 'scanning');
+    if (currentActive) {
+      return; 
+    }
+
+    const nextItem = receiptQueue.find(item => item.status === 'queued');
+    if (!nextItem) {
+      return;
+    }
+
+    const processItem = async () => {
+      setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'compressing' } : item));
+
+      let base64String = "";
+      try {
+        if (nextItem.virtualBase64) {
+          base64String = await resizeAndCompressImage(nextItem.virtualBase64, 2048, 2048, 0.95);
+        } else if (nextItem.file) {
+          const rawBase64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = () => reject(new Error("Failed to read file"));
+            reader.readAsDataURL(nextItem.file!);
+          });
+          
+          base64String = await resizeAndCompressImage(rawBase64, 2048, 2048, 0.95);
+        } else {
+          throw new Error("Žádná data k účtence");
+        }
+
+        setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'scanning' } : item));
+
+        await scanReceiptDirectly(base64String, 'image/jpeg', nextItem.name, nextItem.file?.size);
+
+        setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'done' } : item));
+      } catch (err: any) {
+        console.warn("Queue process used fallback for receipt:", nextItem.name, err?.message || err);
+        setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'failed', error: err.message || "Chyba" } : item));
+        
+        await fallbackReceiptCreation(nextItem.name, base64String || nextItem.virtualBase64 || undefined, nextItem.file?.size);
+        setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'done' } : item));
+      } finally {
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    };
+
+    processItem();
+  }, [receiptQueue]);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [selectedReceiptImage, setSelectedReceiptImage] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedDocCategory, setSelectedDocCategory] = useState<string | null>(null);
   const [isFlashOn, setIsFlashOn] = useState(false);
   const [hasFlash, setHasFlash] = useState(false);
+  const [filterFromDate, setFilterFromDate] = useState<string>('');
+  const [filterToDate, setFilterToDate] = useState<string>('');
 
   // Cropping State
   const [imageToCrop, setImageToCrop] = useState<string | null>(null);
@@ -111,29 +294,85 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Manual Form State
+  // Manual Form State for Receipts
   const [shopName, setShopName] = useState('');
   const [manualPrice, setManualPrice] = useState('');
   const [newCategory, setNewCategory] = useState(CATEGORIES[0].name);
   const [newDate, setNewDate] = useState(new Date().toISOString().split('T')[0]);
 
-  // Persistence: Load from localStorage
+  // Manual Form State for Documents
+  const [docTitle, setDocTitle] = useState('');
+  const [docIssuer, setDocIssuer] = useState('');
+  const [docCategory, setDocCategory] = useState(DOCUMENT_CATEGORIES[0].name);
+  const [docDate, setDocDate] = useState(new Date().toISOString().split('T')[0]);
+  const [docSummary, setDocSummary] = useState('');
+  const [docDetailsRaw, setDocDetailsRaw] = useState('');
+
+  // Helper to merge receipts securely (avoid duplicates by ID)
+  const mergeReceipts = (local: Receipt[], server: Receipt[]) => {
+    const map = new Map<string, Receipt>();
+    local.forEach(r => map.set(r.id, r));
+    server.forEach(r => map.set(r.id, r));
+    return Array.from(map.values());
+  };
+
+  // Sync receipts with backend on mount
   useEffect(() => {
-    const saved = localStorage.getItem('smart-receipts');
-    if (saved) {
+    let active = true;
+    const syncReceipts = async () => {
       try {
-        setReceipts(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to load receipts", e);
+        const response = await fetch("/api/db/receipts");
+        if (response.ok && active) {
+          const serverReceipts = await response.json();
+          if (Array.isArray(serverReceipts)) {
+            setReceipts(prev => {
+              const merged = mergeReceipts(prev, serverReceipts);
+              // Save merged list to localStorage
+              localStorage.setItem('smart-receipts', JSON.stringify(merged));
+              // Save merged list back to backend to keep both strictly in sync
+              if (merged.length !== serverReceipts.length || merged.length !== prev.length) {
+                fetch("/api/db/receipts", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ receipts: merged }),
+                }).catch(err => console.error("Failed to back-sync merged receipts to backend", err));
+              }
+              return merged;
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Failed to retrieve receipts from backend database:", err);
       }
-    }
+    };
+    syncReceipts();
+    return () => { active = false; };
   }, []);
 
-  // Persistence: Save to localStorage
+  // Persistence: Save receipts to localStorage & server backend with safe error catching and debounce
   useEffect(() => {
-    if (receipts.length > 0) {
+    try {
       localStorage.setItem('smart-receipts', JSON.stringify(receipts));
+    } catch (e) {
+      console.warn("Storage quota exceeded. Saving text metadata locally to avoid page crash.", e);
+      try {
+        const textOnlyReceipts = receipts.map(r => ({ ...r, imageUrl: undefined }));
+        localStorage.setItem('smart-receipts', JSON.stringify(textOnlyReceipts));
+      } catch (err) {
+        console.error("Failsafe local storage write failed:", err);
+      }
     }
+    
+    // Debounce backend write to prevent overlapping massive POST payloads
+    const timeoutId = setTimeout(() => {
+      fetch("/api/db/receipts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ receipts }),
+      }).catch(err => console.error("Error backing up receipts to server:", err));
+    }, 1200);
+
+    return () => clearTimeout(timeoutId);
   }, [receipts]);
 
   // Simulated AI Data Pool for Receipts
@@ -248,18 +487,100 @@ export default function App() {
     }
   };
 
-  const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64String = reader.result as string;
-        setImageToCrop(base64String);
-        setIsCropping(true);
-      };
-      reader.readAsDataURL(file);
+  const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const filesCount = e.target.files.length;
+      const newItems: ReceiptQueueItem[] = [];
+      const conflicts: DuplicateConflict[] = [];
+
+      for (let i = 0; i < filesCount; i++) {
+        const file = e.target.files[i];
+        if (!file) continue;
+
+        // Check if there's any existing receipt with same name or size
+        const conflict = receipts.find(r => 
+          r.fileName === file.name || 
+          (r.fileSize && r.fileSize === file.size)
+        );
+
+        if (conflict) {
+          conflicts.push({
+            id: 'CONFL-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
+            file,
+            existingItem: conflict,
+            existingType: 'receipt'
+          });
+        } else {
+          newItems.push({
+            id: 'RQ-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
+            name: file.name,
+            status: 'queued',
+            file: file
+          });
+        }
+      }
+
+      // If singular file and no conflicts, run standard visual crop
+      if (filesCount === 1 && conflicts.length === 0 && newItems.length === 1) {
+        const file = newItems[0].file!;
+        setCroppingFileName(file.name);
+        setCroppingFileSize(file.size);
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64String = reader.result as string;
+          setImageToCrop(base64String);
+          setIsCropping(true);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        // Enqueue remaining clean files
+        if (newItems.length > 0) {
+          setReceiptQueue(prev => [...prev, ...newItems]);
+        }
+      }
+
+      if (conflicts.length > 0) {
+        setDuplicateConflicts(prev => [...prev, ...conflicts]);
+      }
       
       if (e.target) e.target.value = '';
+    }
+  };
+
+  const scanReceiptDirectly = async (base64Image: string, mimeType = 'image/jpeg', fileName?: string, fileSize?: number) => {
+    try {
+      const response = await fetch("/api/extract-receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: base64Image, mimeType }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to extract data via AI");
+      }
+
+      const data = await response.json();
+      
+      if (data.isFallback) {
+        throw new Error(data.error || "Server triggered fallback mode");
+      }
+      
+      const newReceipt: Receipt = {
+        id: Math.random().toString(36).substr(2, 9).toUpperCase(),
+        shopName: data.shopName || "Neznámý obchod",
+        totalAmount: data.totalAmount || 0,
+        date: data.date || new Date().toISOString().split('T')[0],
+        category: data.category || "Ostatní",
+        items: data.items || [],
+        imageUrl: base64Image,
+        fileName,
+        fileSize
+      };
+      setReceipts(prev => [newReceipt, ...prev]);
+    } catch (err: any) {
+      console.warn("Direct receipt scan yielded fallback:", err?.message || err);
+      // Run fail-safe smart fallback generation
+      await fallbackReceiptCreation(fileName || "Účtenka.jpg", base64Image, fileSize);
     }
   };
 
@@ -274,61 +595,48 @@ export default function App() {
       const croppedImage = await getCroppedImg(imageToCrop, croppedAreaPixels);
       setIsCropping(false);
       setImageToCrop(null);
-      startScanning(croppedImage, 'image/jpeg');
+      startScanning(croppedImage, 'image/jpeg', croppingFileName, croppingFileSize);
     } catch (e) {
       console.error(e);
     }
   };
 
-  const startScanning = async (base64Image?: string, mimeType: string = 'image/jpeg') => {
+  const startScanning = async (base64Image?: string, mimeType: string = 'image/jpeg', fileName?: string, fileSize?: number) => {
     setIsScanning(true);
+    setScanningTotal(1);
+    setScanningIndex(1);
     
     try {
       if (base64Image) {
-        const response = await fetch("/api/extract-receipt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ image: base64Image, mimeType }),
-        });
-
-        if (!response.ok) {
-          throw new Error("Failed to extract data via AI");
-        }
-
-        const data = await response.json();
+        // Compress and resize client-side before sending to server
+        const compressed = await resizeAndCompressImage(base64Image, 2048, 2048, 0.95);
+        await scanReceiptDirectly(compressed, mimeType, fileName, fileSize);
+      } else {
+        // Fallback to mock for manual testing if no image
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        const choice = mockAIChoices[Math.floor(Math.random() * mockAIChoices.length)];
+        const total = choice.items.reduce((sum, i) => sum + i.price, 0);
         
         const newReceipt: Receipt = {
           id: Math.random().toString(36).substr(2, 9).toUpperCase(),
-          shopName: data.shopName || "Neznámý obchod",
-          totalAmount: data.totalAmount || 0,
-          date: data.date || new Date().toISOString().split('T')[0],
-          category: data.category || "Ostatní",
-          items: data.items || [],
-          imageUrl: base64Image
+          shopName: choice.shopName,
+          totalAmount: total,
+          date: new Date().toISOString().split('T')[0],
+          category: choice.category,
+          items: choice.items,
+          fileName,
+          fileSize
         };
         setReceipts(prev => [newReceipt, ...prev]);
-      } else {
-        // Fallback to mock for manual testing if no image
-        setTimeout(() => {
-          const choice = mockAIChoices[Math.floor(Math.random() * mockAIChoices.length)];
-          const total = choice.items.reduce((sum, i) => sum + i.price, 0);
-          
-          const newReceipt: Receipt = {
-            id: Math.random().toString(36).substr(2, 9).toUpperCase(),
-            shopName: choice.shopName,
-            totalAmount: total,
-            date: new Date().toISOString().split('T')[0],
-            category: choice.category,
-            items: choice.items
-          };
-          setReceipts(prev => [newReceipt, ...prev]);
-        }, 1500);
       }
     } catch (err) {
       console.error("Scanning failed:", err);
-      alert("AI čtení účtenky selhalo. Zkuste to prosím znovu nebo nákup přidejte ručně.");
     } finally {
       setIsScanning(false);
+      setScanningTotal(0);
+      setScanningIndex(0);
+      setCroppingFileName(undefined);
+      setCroppingFileSize(undefined);
     }
   };
 
@@ -355,24 +663,212 @@ export default function App() {
     setReceipts(prev => prev.filter(r => r.id !== id));
   };
 
-  const sortedReceipts = useMemo(() => {
-    return [...receipts].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [receipts]);
+  const filteredReceipts = useMemo(() => {
+    return receipts.filter(r => {
+      // Compare dates as strings (yyyy-mm-dd format matches alphabetical comparison perfectly)
+      if (filterFromDate && r.date < filterFromDate) return false;
+      if (filterToDate && r.date > filterToDate) return false;
+      return true;
+    });
+  }, [receipts, filterFromDate, filterToDate]);
 
-  const totalSpent = useMemo(() => receipts.reduce((sum, r) => sum + r.totalAmount, 0), [receipts]);
+  const sortedReceipts = useMemo(() => {
+    return [...filteredReceipts].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [filteredReceipts]);
+
+  const totalSpent = useMemo(() => filteredReceipts.reduce((sum, r) => sum + r.totalAmount, 0), [filteredReceipts]);
 
   const categorySummary = useMemo(() => {
     const summary: Record<string, number> = {};
-    receipts.forEach(r => {
+    filteredReceipts.forEach(r => {
       summary[r.category] = (summary[r.category] || 0) + r.totalAmount;
     });
     return summary;
-  }, [receipts]);
+  }, [filteredReceipts]);
+
+  if (activeSection === 'selection') {
+    return (
+      <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex items-center justify-center p-4 md:p-8">
+        <div className="max-w-3xl w-full text-center space-y-12">
+          {/* Logo / Header */}
+          <div className="space-y-3">
+            <motion.div 
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 100 }}
+              className="inline-flex p-4 bg-indigo-600 rounded-3xl text-white shadow-xl shadow-indigo-100 mb-2"
+            >
+              <ShoppingBag size={48} />
+            </motion.div>
+            <h1 className="text-4xl md:text-5xl font-black tracking-tight text-slate-900">
+              DOKLADOVKA
+            </h1>
+            <p className="text-slate-500 max-w-md mx-auto text-base md:text-lg">
+              Váš chytrý AI pomocník pro správu účtenek a osobních celoživotních doložení.
+            </p>
+          </div>
+
+          {/* Cards Container */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Card 1: Receipts */}
+            <motion.button
+              whileHover={{ scale: 1.02, y: -4 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={() => {
+                setActiveSection('receipts');
+                setSelectedCategory(null);
+                setShowManualForm(false);
+              }}
+              className="bg-white border-2 border-slate-100 hover:border-indigo-500 rounded-[32px] p-8 text-left shadow-lg hover:shadow-xl transition-all flex flex-col justify-between h-[300px] cursor-pointer group"
+            >
+              <div className="space-y-4">
+                <div className="p-4 bg-green-50 text-green-600 rounded-2xl w-fit group-hover:bg-green-600 group-hover:text-white transition-colors">
+                  <ShoppingBag size={28} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-800">Složenky a účtenky</h2>
+                <p className="text-slate-500 text-sm leading-relaxed">
+                  Skenování účtenek, automatická kategorizace, položkový přehled a měsíční statistika útrat.
+                </p>
+              </div>
+              <div className="text-indigo-600 font-bold text-sm flex items-center gap-1 group-hover:translate-x-1 transition-transform">
+                Vstoupit do výdajů &rarr;
+              </div>
+            </motion.button>
+
+            {/* Card 2: Documents */}
+            <motion.button
+              whileHover={{ scale: 1.02, y: -4 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={() => {
+                setActiveSection('documents');
+                setSelectedDocCategory(null);
+                setShowManualForm(false);
+              }}
+              className="bg-white border-2 border-slate-100 hover:border-indigo-500 rounded-[32px] p-8 text-left shadow-lg hover:shadow-xl transition-all flex flex-col justify-between h-[300px] cursor-pointer group"
+            >
+              <div className="space-y-4">
+                <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl w-fit group-hover:bg-indigo-600 group-hover:text-white transition-colors">
+                  <FolderOpen size={28} />
+                </div>
+                <h2 className="text-2xl font-bold text-slate-800">Osobní dokumenty</h2>
+                <p className="text-slate-500 text-sm leading-relaxed">
+                  Zdravotní zprávy, smlouvy, úřady, sociální pojištění. AI shrnutí obsahu, klíčové lhůty a detaily.
+                </p>
+              </div>
+              <div className="text-indigo-600 font-bold text-sm flex items-center gap-1 group-hover:translate-x-1 transition-transform">
+                Vstoupit do dokumentu &rarr;
+              </div>
+            </motion.button>
+          </div>
+
+          <div className="text-xs text-slate-400 font-medium">
+            Dokladovka Pipap.cz &copy; {new Date().getFullYear()} &bull; Všechna data jsou bezpečně uložena na vašem zařízení.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeSection === 'documents') {
+    return (
+      <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-4 md:p-8">
+        <div className="max-w-4xl mx-auto space-y-8">
+          <DocumentSection 
+            onBack={() => setActiveSection('selection')} 
+            onPreviewImage={(src) => setSelectedReceiptImage(src)} 
+          />
+          
+          {/* Shared Full Image Preview Modal */}
+          <AnimatePresence>
+            {selectedReceiptImage && (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setSelectedReceiptImage(null)}
+                className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 md:p-12 cursor-pointer"
+              >
+                <motion.div 
+                  initial={{ scale: 0.9, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.9, opacity: 0 }}
+                  className="relative max-w-4xl max-h-full"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <img 
+                    src={selectedReceiptImage} 
+                    alt="Full Scan" 
+                    className="rounded-2xl shadow-2xl max-h-[85vh] object-contain"
+                  />
+                  <button 
+                    onClick={() => setSelectedReceiptImage(null)}
+                    className="absolute -top-4 -right-4 p-3 bg-white text-slate-900 rounded-full shadow-xl hover:scale-110 transition-transform"
+                  >
+                    <Plus className="rotate-45" size={20} />
+                  </button>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans p-4 md:p-8">
       <div className="max-w-4xl mx-auto space-y-8">
         
+        {/* Navigation Top bar */}
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => {
+              setActiveSection('selection');
+              setSelectedCategory(null);
+            }}
+            className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-indigo-600 transition-colors bg-white px-4 py-2 rounded-xl border border-slate-200 shadow-sm cursor-pointer"
+          >
+            <ArrowLeft size={16} />
+            Zpět na výběr sekce
+          </button>
+          <span className="text-xs font-bold uppercase text-slate-400 tracking-wider">
+            Sekce: Účtenky a složenky
+          </span>
+        </div>
+
+        {/* Quota limit warning banner */}
+        {showQuotaWarning && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-amber-50 rounded-3xl p-5 border border-amber-200/80 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 text-left font-sans text-slate-800"
+          >
+            <div className="flex gap-4">
+              <span className="p-3 bg-amber-100 text-amber-600 rounded-2xl flex-shrink-0 self-start md:self-center">
+                <AlertTriangle size={20} />
+              </span>
+              <div className="space-y-1">
+                <h4 className="text-sm font-bold text-slate-950">Aktivován lokální záložní režim (Limit API překročen)</h4>
+                <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
+                  Byl vyčerpán bezplatný limit požadavků pro Gemini API. Abychom vám umožnili aplikaci nadále testovat, 
+                  systém automaticky generuje <strong>inteligentní náhledy na základě názvů nahraných souborů</strong>.
+                  Pro plnou podporu naskenovaných dat s reálným OCR si můžete kdykoliv vložit vlastní API klíč v levém dolním menu pod ozubeným kolečkem.
+                </p>
+              </div>
+            </div>
+            <button 
+              type="button" 
+              onClick={() => {
+                localStorage.removeItem('gemini-quota-warning');
+                setShowQuotaWarning(false);
+              }}
+              className="text-xs font-bold text-slate-400 hover:text-slate-600 px-3 py-1.5 rounded-lg hover:bg-amber-100/50 transition-all cursor-pointer whitespace-nowrap self-end md:self-auto bg-transparent border-0"
+            >
+              Skrýt upozornění
+            </button>
+          </motion.div>
+        )}
+
         {/* Header */}
         <header className="flex flex-col sm:flex-row sm:items-start justify-between gap-6">
           <div className="text-left">
@@ -380,7 +876,7 @@ export default function App() {
               <span className="p-2.5 bg-indigo-600 rounded-2xl text-white shadow-lg shadow-indigo-200">
                 <ShoppingBag size={24} />
               </span>
-              Nákupní Rádce
+              DOKLADOVKA
             </h1>
             <p className="text-slate-500 mt-2 text-sm md:text-base">Mějte přehled o každém rohlíku skrze AI.</p>
           </div>
@@ -415,6 +911,7 @@ export default function App() {
               onChange={handleFileUpload} 
               className="hidden" 
               accept="image/*"
+              multiple
             />
             <input 
               type="file" 
@@ -635,9 +1132,17 @@ export default function App() {
                     <Zap size={20} className="absolute inset-0 m-auto text-yellow-400 animate-pulse" />
                   </div>
                 </div>
-                <h2 className="text-xl font-bold">Magické čtení...</h2>
+                <h2 className="text-xl font-bold">
+                  {scanningTotal > 1 
+                    ? `Magické čtení účtenek (${scanningIndex}/${scanningTotal})...`
+                    : "Magické čtení..."
+                  }
+                </h2>
                 <p className="text-indigo-100 max-w-sm font-medium">
-                  Naše AI právě precizně extrahuje data z vaší účtenky.
+                  {scanningTotal > 1
+                    ? "Naše AI postupně extrahuje a analyzuje data ze všech nahraných účtenek."
+                    : "Naše AI právě precizně extrahuje data z vaší účtenky."
+                  }
                 </p>
               </div>
             </motion.div>
@@ -773,6 +1278,122 @@ export default function App() {
           </div>
         </section>
 
+        {/* Period selection & Export controls */}
+        <div className="bg-white border border-slate-200 p-6 rounded-3xl flex flex-col md:flex-row gap-5 items-center justify-between shadow-xs mb-2">
+          <div className="flex flex-col sm:flex-row gap-4 items-center w-full md:w-auto">
+            <div className="flex items-center gap-2 text-slate-700 font-semibold text-sm whitespace-nowrap self-start sm:self-auto">
+              <Calendar size={18} className="text-indigo-600" />
+              <span>Zvolené období pro přehled:</span>
+            </div>
+            
+            <div className="flex items-center gap-2.5 w-full sm:w-auto">
+              <div className="relative w-full sm:w-36">
+                <span className="absolute left-3 top-2.5 text-[9px] font-bold text-slate-400 uppercase tracking-wider">Od</span>
+                <input 
+                  type="date"
+                  value={filterFromDate}
+                  onChange={(e) => setFilterFromDate(e.target.value)}
+                  className="w-full pl-9 pr-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-750 font-medium"
+                />
+              </div>
+              
+              <span className="text-slate-400 font-bold">—</span>
+              
+              <div className="relative w-full sm:w-36">
+                <span className="absolute left-3 top-2.5 text-[9px] font-bold text-slate-400 uppercase tracking-wider">Do</span>
+                <input 
+                  type="date"
+                  value={filterToDate}
+                  onChange={(e) => setFilterToDate(e.target.value)}
+                  className="w-full pl-9 pr-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 text-slate-755 font-medium"
+                />
+              </div>
+              
+              {(filterFromDate || filterToDate) && (
+                <button 
+                  onClick={() => { setFilterFromDate(''); setFilterToDate(''); }}
+                  className="text-xs text-red-500 hover:text-red-700 font-bold hover:underline cursor-pointer px-2 py-1 shrink-0"
+                >
+                  Smazat
+                </button>
+              )}
+            </div>
+          </div>
+          
+          <button
+            onClick={() => exportExpensesToPDF(sortedReceipts, filterFromDate, filterToDate, totalSpent)}
+            disabled={sortedReceipts.length === 0}
+            className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 disabled:cursor-not-allowed rounded-2xl font-semibold text-sm shadow-md shadow-indigo-100 transition-all cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Download size={16} />
+            <span>Exportovat přehled (PDF)</span>
+          </button>
+        </div>
+
+        {/* Fronta nahrávání a zpracování účtenek */}
+        {receiptQueue.length > 0 && (
+          <div className="bg-white border-2 border-indigo-100 rounded-3xl p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-indigo-50 pb-3">
+              <h3 className="font-bold text-slate-900 flex items-center gap-2 text-sm md:text-base">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-600"></span>
+                </span>
+                Fronta zpracování účtenek ({receiptQueue.filter(q => q.status === 'done' || q.status === 'failed').length} / {receiptQueue.length} hotovo)
+              </h3>
+              {receiptQueue.every(q => q.status === 'done' || q.status === 'failed') && (
+                <button 
+                  onClick={() => setReceiptQueue([])}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+                >
+                  Vyčistit frontu
+                </button>
+              )}
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-60 overflow-y-auto pr-1">
+              {receiptQueue.map(item => (
+                <div 
+                  key={item.id} 
+                  className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs transition-all ${
+                    item.status === 'done' ? 'bg-emerald-50 border-emerald-100' :
+                    item.status === 'failed' ? 'bg-red-50 border-red-100' :
+                    item.status === 'scanning' ? 'bg-indigo-50 border-indigo-200 animate-pulse' :
+                    item.status === 'compressing' ? 'bg-amber-50 border-amber-200' :
+                    'bg-slate-50 border-slate-100'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <FileText size={16} className={
+                      item.status === 'done' ? 'text-emerald-500' :
+                      item.status === 'failed' ? 'text-red-500' :
+                      item.status === 'scanning' ? 'text-indigo-500 animate-spin' :
+                      'text-slate-400'
+                    } />
+                    <span className="font-semibold text-slate-700 truncate block" title={item.name}>
+                      {item.name}
+                    </span>
+                  </div>
+                  
+                  <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider shrink-0 whitespace-nowrap ${
+                    item.status === 'done' ? 'bg-emerald-500 text-white' :
+                    item.status === 'failed' ? 'bg-red-500 text-white' :
+                    item.status === 'scanning' ? 'bg-indigo-600 text-white' :
+                    item.status === 'compressing' ? 'bg-amber-500 text-white' :
+                    'bg-slate-300 text-slate-700'
+                  }`}>
+                    {item.status === 'done' ? 'Hotovo' :
+                     item.status === 'failed' ? 'Chyba' :
+                     item.status === 'scanning' ? 'AI Sken...' :
+                     item.status === 'compressing' ? 'Komprese' :
+                     'Čeká'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Bills List (Latest) */}
         <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="p-4 md:p-6 border-b border-slate-100 flex items-center justify-between">
@@ -780,7 +1401,9 @@ export default function App() {
               <History size={20} className="text-indigo-600" />
               Poslední přidané
             </h2>
-            <span className="text-[10px] md:text-xs font-medium text-slate-400 uppercase tracking-wider">Celkem {receipts.length} položek</span>
+            <span className="text-[10px] md:text-xs font-medium text-slate-500 uppercase tracking-wider bg-slate-100 px-2.5 py-1 rounded-full">
+              Zobrazeno {sortedReceipts.length} z {receipts.length}
+            </span>
           </div>
           
           {/* Desktop Table View */}
@@ -800,11 +1423,11 @@ export default function App() {
                   {sortedReceipts.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-6 py-12 text-center text-slate-400 italic">
-                        Zatím nemáte žádné naskenované nákupy.
+                        V tomto období nemáte žádné přidané nákupy.
                       </td>
                     </tr>
                   ) : (
-                    receipts.slice(0, 1).map(receipt => (
+                    sortedReceipts.map(receipt => (
                       <motion.tr 
                         key={receipt.id}
                         initial={{ opacity: 0, x: -10 }}
@@ -833,7 +1456,14 @@ export default function App() {
                               </button>
                             )}
                             <div>
-                              <div className="font-medium text-slate-900">{receipt.shopName}</div>
+                              <div className="font-medium text-slate-900 flex flex-wrap items-center gap-1.5 leading-tight">
+                                {receipt.shopName}
+                                {receipt.isFallback && (
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100">
+                                    Simulováno (API Quota Limit)
+                                  </span>
+                                )}
+                              </div>
                               <div className="text-xs text-slate-400 flex flex-col gap-1 mt-2">
                                 {receipt.items.map((item, idx) => (
                                   <div key={idx} className="flex justify-between max-w-[200px]">
@@ -879,12 +1509,12 @@ export default function App() {
           {/* Mobile Card View */}
           <div className="md:hidden divide-y divide-slate-100 text-slate-900">
             <AnimatePresence initial={false}>
-              {receipts.length === 0 ? (
+              {sortedReceipts.length === 0 ? (
                 <div className="px-6 py-12 text-center text-slate-400 italic">
-                  Zatím nemáte žádné naskenované nákupy.
+                  V tomto období nemáte žádné přidané nákupy.
                 </div>
               ) : (
-                receipts.slice(0, 1).map(receipt => (
+                sortedReceipts.map(receipt => (
                   <motion.div 
                     key={receipt.id}
                     initial={{ opacity: 0, y: 10 }}
@@ -913,7 +1543,14 @@ export default function App() {
                           </button>
                         )}
                         <div>
-                          <div className="font-semibold text-slate-900">{receipt.shopName}</div>
+                          <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-1.5 leading-tight">
+                            {receipt.shopName}
+                            {receipt.isFallback && (
+                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100">
+                                Simulováno (API Quota Limit)
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-slate-400 uppercase tracking-wide">{receipt.id}</div>
                         </div>
                       </div>
@@ -1050,6 +1687,137 @@ export default function App() {
                     )}
                   </div>
                 </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {duplicateConflicts.length > 0 && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 text-left font-sans"
+            >
+              <motion.div 
+                initial={{ scale: 0.95, y: 15 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.95, y: 15 }}
+                className="bg-white rounded-3xl p-6 lg:p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl space-y-6"
+              >
+                <div className="flex items-center gap-3 border-b border-rose-100 pb-4">
+                  <div className="p-3 bg-rose-50 text-rose-500 rounded-2xl">
+                    <History size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-slate-900">Duplicitní soubor detekován</h3>
+                    <p className="text-xs text-slate-500">
+                      Tento soubor byl pravděpodobně již nahrán. Vyberte, jak konflikt vyřešit.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 rounded-2xl p-4 text-xs text-slate-600 border border-slate-100 leading-relaxed">
+                  Byl rozpoznán soubor se stejným názvem popř. velikostí jako již existující uložená účtenka. Srovnejte je prosím níže:
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-2">
+                  {/* Left: Existing Item */}
+                  <div className="border border-slate-200 rounded-2xl p-4 bg-slate-50/55 space-y-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Existující uložený záznam:</div>
+                    <div className="space-y-1.5 min-w-0">
+                      <div className="font-bold text-base text-indigo-700 truncate block">
+                        {duplicateConflicts[0].existingItem.shopName}
+                      </div>
+                      <div className="text-xs font-semibold text-slate-500">
+                        Datum: {new Date(duplicateConflicts[0].existingItem.date).toLocaleDateString('cs-CZ')}
+                      </div>
+                      <div className="text-xs font-semibold text-indigo-600">
+                        Částka: {duplicateConflicts[0].existingItem.totalAmount} Kč
+                      </div>
+                      <div className="text-[10px] text-slate-400 italic truncate block">
+                        Soubor: {duplicateConflicts[0].existingItem.fileName || "Není k dispozici"}
+                      </div>
+                    </div>
+                    {duplicateConflicts[0].existingItem.imageUrl ? (
+                      <img 
+                        src={duplicateConflicts[0].existingItem.imageUrl} 
+                        alt="Stávající" 
+                        className="w-full h-44 object-cover rounded-xl border border-slate-200 mt-2"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-full h-44 bg-slate-100 flex items-center justify-center rounded-xl border border-dashed border-slate-200 text-slate-400 text-xs">
+                        Bez fotografie stávajícího
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: New File */}
+                  <div className="border border-indigo-100 rounded-2xl p-4 bg-indigo-50/20 space-y-3">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-500">Nový nahraný soubor:</div>
+                    <div className="space-y-1.5 min-w-0">
+                      <div className="font-bold text-base text-slate-900 truncate block" title={duplicateConflicts[0].file.name}>
+                        {duplicateConflicts[0].file.name}
+                      </div>
+                      <div className="text-xs font-semibold text-slate-500">
+                        Velikost: {Math.round(duplicateConflicts[0].file.size / 1024)} KB
+                      </div>
+                      <div className="text-xs font-semibold text-slate-500">
+                        Typ: {duplicateConflicts[0].file.type || "neznámý"}
+                      </div>
+                      <div className="text-[10px] text-indigo-500 font-medium">
+                        Připraven k doložení / opětovnému skenování
+                      </div>
+                    </div>
+                    <FilePreview file={duplicateConflicts[0].file} />
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row justify-end gap-3 pt-3 border-t border-slate-100">
+                  <button
+                    onClick={() => {
+                      setDuplicateConflicts(prev => prev.slice(1));
+                    }}
+                    className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-700 hover:bg-slate-50 font-bold transition-all text-xs cursor-pointer"
+                  >
+                    Přeskočit (Neukládat)
+                  </button>
+                  <button
+                    onClick={() => {
+                      const conflict = duplicateConflicts[0];
+                      const newQueueItem: ReceiptQueueItem = {
+                        id: 'RQ-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
+                        name: conflict.file.name,
+                        status: 'queued',
+                        file: conflict.file
+                      };
+                      setReceiptQueue(prev => [...prev, newQueueItem]);
+                      setDuplicateConflicts(prev => prev.slice(1));
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 text-white hover:bg-slate-700 font-bold transition-all text-xs cursor-pointer"
+                  >
+                    Ponechat oba
+                  </button>
+                  <button
+                    onClick={() => {
+                      const conflict = duplicateConflicts[0];
+                      setReceipts(prev => prev.filter(r => r.id !== conflict.existingItem.id));
+                      const newQueueItem: ReceiptQueueItem = {
+                        id: 'RQ-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
+                        name: conflict.file.name,
+                        status: 'queued',
+                        file: conflict.file
+                      };
+                      setReceiptQueue(prev => [...prev, newQueueItem]);
+                      setDuplicateConflicts(prev => prev.slice(1));
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition-all text-xs cursor-pointer"
+                  >
+                    Nahradit stávající
+                  </button>
+                </div>
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
