@@ -1,0 +1,8 @@
+{
+  "name": "Nákupní Rádce - AI Správce Účtenek",
+  "description": "Chytrý správce nákupů se simulovaným AI OCR přepisem položek z účtenek, kategorizací a měsíčním přehledem výdajů.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
