@@ -211,11 +211,35 @@ export function getSmartFallbackDocument(fileName: string, fileSize?: number) {
     ];
   }
 
+  // Try to extract date or year from the original filename for sorting
+  let issueDate = new Date().toISOString().split('T')[0];
+  
+  // 1. Match YYYY-MM-DD (e.g. 2024-05-12 or 2024_05_12)
+  const yyyymmddMatch = fileName.match(/\b(19\d\d|20\d\d)[-._](0[1-9]|1[0-2])[-._](0[1-9]|[12]\d|3[01])\b/);
+  if (yyyymmddMatch) {
+    issueDate = `${yyyymmddMatch[1]}-${yyyymmddMatch[2]}-${yyyymmddMatch[3]}`;
+  } else {
+    // 2. Match DD.MM.YYYY (e.g. 12.5.2024 or 12_5_2024)
+    const ddmmyyyyMatch = fileName.match(/\b(0?[1-9]|[12]\d|3[01])[-._](0?[1-9]|1[0-2])[-._](19\d\d|20\d\d)\b/);
+    if (ddmmyyyyMatch) {
+      const day = ddmmyyyyMatch[1].padStart(2, '0');
+      const month = ddmmyyyyMatch[2].padStart(2, '0');
+      const year = ddmmyyyyMatch[3];
+      issueDate = `${year}-${month}-${day}`;
+    } else {
+      // 3. Match any 4 digit starting with 19 or 20 (as year)
+      const yearMatch = fileName.match(/\b(19[89]\d|20[0123]\d)\b/);
+      if (yearMatch) {
+        issueDate = `${yearMatch[1]}-01-01`;
+      }
+    }
+  }
+
   return {
     title,
     issuer,
     category,
-    issueDate: new Date().toISOString().split('T')[0],
+    issueDate,
     summary,
     keyDetails
   };

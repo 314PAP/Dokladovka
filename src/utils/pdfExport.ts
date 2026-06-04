@@ -215,6 +215,7 @@ export function exportExpensesToPDF(
   }
 
   doc.save(`Prehled_Vydaju_${startDate || "vse"}_do_${endDate || "dnes"}.pdf`);
+  return doc;
 }
 
 /**
@@ -360,4 +361,5 @@ export function exportDocumentsToPDF(
   }
 
   doc.save(`Archiv_Dokumentu_${startDate || "vse"}_do_${endDate || "dnes"}.pdf`);
+  return doc;
 }

@@ -29,10 +29,12 @@ import {
   FolderOpen,
   Calendar,
   Download,
-  AlertTriangle
+  AlertTriangle,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import DocumentSection from './components/DocumentSection';
+import GoogleSettings from './components/GoogleSettings';
 import { exportExpensesToPDF } from './utils/pdfExport';
 import { resizeAndCompressImage } from './utils/imageCompressor';
 import { getSmartFallbackReceipt } from './utils/smartFallback';
@@ -53,6 +55,7 @@ interface Receipt {
   fileName?: string;
   fileSize?: number;
   isFallback?: boolean;
+  fallbackError?: string;
 }
 
 interface ReceiptQueueItem {
@@ -75,6 +78,8 @@ interface DocumentItem {
   imageUrl?: string;
   fileName?: string;
   fileSize?: number;
+  isFallback?: boolean;
+  fallbackError?: string;
 }
 
 interface DuplicateConflict {
@@ -159,8 +164,54 @@ function FilePreview({ file }: { file: File }) {
 }
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<'selection' | 'receipts' | 'documents'>('selection');
+  const [activeSection, setActiveSection] = useState<'selection' | 'receipts' | 'documents' | 'settings'>('selection');
   
+  // Google / Custom credentials states
+  const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("dokladovka-user-api-key") || "");
+  const [googleClientId, setGoogleClientId] = useState(() => localStorage.getItem("dokladovka-google-client-id") || "");
+  const [googleUser, setGoogleUser] = useState<any>(() => {
+    try {
+      const saved = localStorage.getItem("dokladovka-google-user");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (window.location.hash) {
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      const token = params.get("access_token");
+      if (token) {
+        window.history.replaceState(
+          {}, 
+          document.title, 
+          window.location.pathname + window.location.search
+        );
+        
+        setGoogleAccessToken(token);
+        setActiveSection('settings');
+        
+        fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+        .then(r => {
+          if (!r.ok) throw new Error("Profil se nepodařilo stáhnout");
+          return r.json();
+        })
+        .then(user => {
+          setGoogleUser(user);
+          localStorage.setItem("dokladovka-google-user", JSON.stringify(user));
+        })
+        .catch(err => {
+          console.error("Chyba Google Profilu:", err);
+        });
+      }
+    }
+  }, []);
+
   const [receipts, setReceipts] = useState<Receipt[]>(() => {
     try {
       const saved = localStorage.getItem('smart-receipts') || localStorage.getItem('receipts');
@@ -199,7 +250,7 @@ export default function App() {
     }
   }, [receiptQueue]);
 
-  const fallbackReceiptCreation = async (fileName: string, base64Image?: string, fileSize?: number) => {
+  const fallbackReceiptCreation = async (fileName: string, base64Image?: string, fileSize?: number, fallbackError?: string) => {
     const smartData = getSmartFallbackReceipt(fileName, fileSize);
     
     // Set warning flag
@@ -216,7 +267,8 @@ export default function App() {
       imageUrl: base64Image || undefined,
       fileName,
       fileSize,
-      isFallback: true
+      isFallback: true,
+      fallbackError
     };
     setReceipts(prev => [newReceipt, ...prev]);
   };
@@ -262,7 +314,12 @@ export default function App() {
         console.warn("Queue process used fallback for receipt:", nextItem.name, err?.message || err);
         setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'failed', error: err.message || "Chyba" } : item));
         
-        await fallbackReceiptCreation(nextItem.name, base64String || nextItem.virtualBase64 || undefined, nextItem.file?.size);
+        await fallbackReceiptCreation(
+          nextItem.name, 
+          base64String || nextItem.virtualBase64 || undefined, 
+          nextItem.file?.size,
+          err?.message || String(err)
+        );
         setReceiptQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'done' } : item));
       } finally {
         await new Promise(resolve => setTimeout(resolve, 350));
@@ -549,9 +606,13 @@ export default function App() {
 
   const scanReceiptDirectly = async (base64Image: string, mimeType = 'image/jpeg', fileName?: string, fileSize?: number) => {
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (userApiKey) {
+        headers["x-gemini-key"] = userApiKey;
+      }
       const response = await fetch("/api/extract-receipt", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ image: base64Image, mimeType }),
       });
 
@@ -580,7 +641,7 @@ export default function App() {
     } catch (err: any) {
       console.warn("Direct receipt scan yielded fallback:", err?.message || err);
       // Run fail-safe smart fallback generation
-      await fallbackReceiptCreation(fileName || "Účtenka.jpg", base64Image, fileSize);
+      await fallbackReceiptCreation(fileName || "Účtenka.jpg", base64Image, fileSize, err?.message || String(err));
     }
   };
 
@@ -761,11 +822,43 @@ export default function App() {
             </motion.button>
           </div>
 
-          <div className="text-xs text-slate-400 font-medium">
+          {/* Bezpečné Nastavení Button */}
+          <div className="flex flex-col items-center gap-4">
+            <motion.button
+              whileHover={{ scale: 1.02, y: -2 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={() => setActiveSection('settings')}
+              className="inline-flex items-center gap-2.5 px-6 py-3 border border-slate-200 hover:border-indigo-400 bg-white hover:bg-slate-50 text-slate-700 font-bold text-sm shadow-sm hover:shadow-md rounded-2xl transition-all cursor-pointer"
+            >
+              <Settings size={16} className="text-indigo-600" />
+              <span>Nastavení Google integrace & API klíče</span>
+              {googleUser && (
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-1" title="Přihlášen k Google" />
+              )}
+            </motion.button>
+          </div>
+
+          <div className="text-xs text-slate-400 font-medium pt-4">
             Dokladovka Pipap.cz &copy; {new Date().getFullYear()} &bull; Všechna data jsou bezpečně uložena na vašem zařízení.
           </div>
         </div>
       </div>
+    );
+  }
+
+  if (activeSection === 'settings') {
+    return (
+      <GoogleSettings 
+        onBack={() => setActiveSection('selection')} 
+        apiKey={userApiKey} 
+        setApiKey={setUserApiKey}
+        clientId={googleClientId}
+        setClientId={setGoogleClientId}
+        googleUser={googleUser}
+        setGoogleUser={setGoogleUser}
+        accessToken={googleAccessToken}
+        setAccessToken={setGoogleAccessToken}
+      />
     );
   }
 
@@ -776,6 +869,9 @@ export default function App() {
           <DocumentSection 
             onBack={() => setActiveSection('selection')} 
             onPreviewImage={(src) => setSelectedReceiptImage(src)} 
+            userApiKey={userApiKey}
+            googleAccessToken={googleAccessToken}
+            googleUser={googleUser}
           />
           
           {/* Shared Full Image Preview Modal */}
@@ -1459,8 +1555,11 @@ export default function App() {
                               <div className="font-medium text-slate-900 flex flex-wrap items-center gap-1.5 leading-tight">
                                 {receipt.shopName}
                                 {receipt.isFallback && (
-                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100">
-                                    Simulováno (API Quota Limit)
+                                  <span 
+                                    title={receipt.fallbackError ? `Chyba API: ${receipt.fallbackError}` : "Zapnut automatický záložní režim pro úsporu tokenů"}
+                                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100 cursor-help"
+                                  >
+                                    {receipt.fallbackError ? "Simulováno (Chyba API)" : "Simulováno (API Quota Limit)"}
                                   </span>
                                 )}
                               </div>
@@ -1546,8 +1645,11 @@ export default function App() {
                           <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-1.5 leading-tight">
                             {receipt.shopName}
                             {receipt.isFallback && (
-                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100">
-                                Simulováno (API Quota Limit)
+                              <span 
+                                title={receipt.fallbackError ? `Chyba API: ${receipt.fallbackError}` : "Zapnut automatický záložní režim pro úsporu tokenů"}
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100 cursor-help"
+                              >
+                                {receipt.fallbackError ? "Simulováno (Chyba API)" : "Simulováno (API Quota Limit)"}
                               </span>
                             )}
                           </div>

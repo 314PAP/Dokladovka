@@ -7,8 +7,14 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Explicitly use the user's active, verified working Gemini API key to override depleted environment defaults
+const API_KEY = "AQ.Ab8RN6K2voDjgYBqIemIlMuzMnn1mgpzC_TLXF0Rt1zv0I8DNQ";
+
+// Global array to store key details of the latest system extraction errors for diagnostics
+const debugErrors: Array<{ timestamp: string; endpoint: string; errorMessage: string; errorStack?: string }> = [];
+
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || "",
+  apiKey: API_KEY,
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
@@ -17,14 +23,23 @@ const ai = new GoogleGenAI({
 });
 
 // Helper function to call generateContent with retry and exponential backoff
-async function generateContentWithRetry(params: any, maxRetries = 3) {
+async function generateContentWithRetry(apiKeyToUse: string, params: any, maxRetries = 3) {
+  const dynamicAi = new GoogleGenAI({
+    apiKey: apiKeyToUse || API_KEY,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      }
+    }
+  });
+
   let delay = 1000; // start with 1 second delay
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error("GEMINI_API_KEY environment variable is not defined");
+      if (!apiKeyToUse && !API_KEY) {
+        throw new Error("GEMINI_API_KEY is not defined");
       }
-      return await ai.models.generateContent(params);
+      return await dynamicAi.models.generateContent(params);
     } catch (error: any) {
       const errorMessage = error?.message || String(error);
       const isTransient = 
@@ -61,16 +76,19 @@ async function startServer() {
   app.post("/api/extract-receipt", async (req, res) => {
     try {
       const { image, mimeType = "image/jpeg" } = req.body;
+      const clientKey = req.headers["x-gemini-key"];
+      const keyToUse = typeof clientKey === "string" && clientKey.trim() ? clientKey.trim() : API_KEY;
+
       if (!image) {
         return res.status(400).json({ error: "No image data provided" });
       }
 
-      console.log(`Processing receipt extraction. MimeType: ${mimeType}`);
+      console.log(`Processing receipt extraction. MimeType: ${mimeType}. Custom Key: ${clientKey ? "Yes" : "No"}`);
 
       // Remove prefix if exists (e.g. data:image/png;base64,)
       const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
 
-      const response = await generateContentWithRetry({
+      const response = await generateContentWithRetry(keyToUse, {
         model: "gemini-3.5-flash",
         contents: [
           {
@@ -129,6 +147,12 @@ PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
       res.json(extractedData);
     } catch (error: any) {
       console.warn("Extraction warning details:", error?.message || error);
+      debugErrors.push({
+        timestamp: new Date().toISOString(),
+        endpoint: "/api/extract-receipt",
+        errorMessage: error?.message || String(error),
+        errorStack: error?.stack
+      });
       res.json({ isFallback: true, error: error?.message || String(error) });
     }
   });
@@ -137,16 +161,19 @@ PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
   app.post("/api/extract-document", async (req, res) => {
     try {
       const { image, mimeType = "image/jpeg" } = req.body;
+      const clientKey = req.headers["x-gemini-key"];
+      const keyToUse = typeof clientKey === "string" && clientKey.trim() ? clientKey.trim() : API_KEY;
+
       if (!image) {
         return res.status(400).json({ error: "No image data provided" });
       }
 
-      console.log(`Processing document extraction. MimeType: ${mimeType}`);
+      console.log(`Processing document extraction. MimeType: ${mimeType}. Custom Key: ${clientKey ? "Yes" : "No"}`);
 
       // Remove prefix if exists
       const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
 
-      const response = await generateContentWithRetry({
+      const response = await generateContentWithRetry(keyToUse, {
         model: "gemini-3.5-flash",
         contents: [
           {
@@ -158,23 +185,21 @@ PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
                 }
               },
               {
-                text: "Analyzuj a přesně vytěž (OCR) tento dokument. Vyplň požadovaná pole na základě viditelných zjištěných faktů v českém jazyce."
+                text: "Analyzuj tento dokument. Hlavním a nejdůležitějším úkolem je najít PŮVODNÍ DATUM VYSTAVENÍ/VYDÁNÍ/SEPSÁNÍ dokumentu (např. datum lékařské kontroly, datum podpisu smlouvy, datum vydání rozhodnutí zapsané na dokumentu v záhlaví či v textu) a uložit jej ve formátu YYYY-MM-DD. Pokud je vyfoceno více dokumentů, vytáhni datum prvního z nich."
               }
             ]
           }
         ],
         config: {
-          systemInstruction: `Jsi špičkový OCR asistent pro digitalizaci, analýzu a přesné vytěžování českých úředních, lékařských, sociálních a pracovních dokumentů.
+          systemInstruction: `Jsi špičkový OCR asistent pro rychlou digitalizaci a přesné vytěžování záhlaví českých úředních, lékařských, sociálních a pracovních dokumentů.
 Tvá práce musí být stoprocentně spolehlivá, faktická, přesná a zcela bez jakýchkoliv halucinací.
 
 PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
-1. ŽÁDNÉ HALUCINACE A SMYŠLENÁ JMÉNA. Nikdy si nic nevymýšlej. Pokud v dokumentu nevidíš konkrétní jméno úřadu, jméno lékaře, firmu, jméno zaměstnance nebo ustanovení, NEODHADUJ JE ani si nevymýšlej náhodné subjekty. Místo domýšlení použij "Neznámo" nebo prázdný řetězec "".
-2. VYSTAVITEL (issuer): Skutečná, doložitelná instituce, firma, lékař či úřad, který dokument vydal a podepsal (např. "Fakultní nemocnice v Motole", "Úřad práce ČR", "Česká správa sociálního zabezpečení", "Zaměstnavatel ACME s.r.o.", "MŠMT ČR"). Pokud razítko nebo vystavitel není čitelný, použij "Neznámo", nikdy si nevymýšlej fiktivní instituci.
-3. NÁZEV (title): Výstižný název dokumentu v češtině (např. "Pracovní smlouva", "Lékařská zpráva", "Rozhodnutí o přiznání podpory", "Potvrzení o studiu", "Zápočtový list"). Pokud chybí jasný nadpis, pojmenuj jej věcně a stručně podle obsahu.
-4. DATUM VYSTAVENÍ (issueDate): Vytáhni datum podpisu či vydání dokumentu ve formátu YYYY-MM-DD. Pokud s jistotou žádné datum na dokumentu není vidět, použij dnešní datum rozumným způsobem jako zálohu, nebo prázdný řetězec.
-5. KATEGORIE (category): Spáruj dokument s přesně jednou z následujících povolených kategorií: "Zdravotní", "Pracovní úřad", "Sociální zabezpečení", "Pracovní smlouvy", "Ostatní".
-6. SOUHRN (summary): Napiš stručný, ale 100% věcný souhrn obsahu dokumentu v rozsahu 1-3 vět v českém jazyce. Uveď pouze to, co je v textu přímo napsáno (např. "Lékařská zpráva z ortopedického vyšetření pacienta, diagnostikována distorze kolena a doporučena rehabilitace", nebo "Pracovní smlouva uzavřená na dobu neurčitou s nástupem od 1. 2. 2026"). Nikdy neuváděj detaily, které na snímku nejsou zapsány!
-7. KLÍČOVÉ DETAILY (keyDetails): Získej pole 1 až 4 nejdůležitějších faktických detailů zapsaných přímo v textu (diagnózy, pracovní schůzky, výše finanční podpory, termíny, limitní závazky apod.). Pokud detaily chybí, uveď pouze ty prokazatelně čitelné.`,
+1. ŽÁDNÉ HALUCINACE A SMYŠLENÁ JMÉNA. Nikdy si nic nevymýšlej. Pokud v dokumentu nevidíš konkrétní jméno úřadu, jméno lékaře, firmu atd., NEODHADUJ JE. Místo domýšlení použij "Neznámo" nebo prázdný řetězec "".
+2. VYSTAVITEL (issuer): Skutečná, doložitelná instituce, firma, lékař či úřad, který dokument v záhlaví vydal a podepsal (např. "Fakultní nemocnice v Motole", "Úřad práce ČR", "Česká správa sociálního zabezpečení", "Zaměstnavatel ACME s.r.o."). Pokud razítko nebo vystavitel není čitelný, použij "Neznámo".
+3. NÁZEV (title): Výstižný název dokumentu v češtině (např. "Pracovní smlouva", "Lékařská zpráva", "Rozhodnutí o přiznání podpory", "Potvrzení o studiu", "Zápočtový list"). Pokud chybí jasný nadpis, pojmenuj jej věcně a stručně podle obsahu záhlaví.
+4. DATUM VYSTAVENÍ (issueDate): NEJDŮLEŽITĚJŠÍ POLE. Vytáhni skutečné původní datum podpisu, konání vyšetření, vystavení či doručení zapsané na samotném dokumentu jako text či razítko ve formátu YYYY-MM-DD (např. "V Praze dne 15. ledna 2026" -> "2026-01-15"). Pokud na dokumentu vidíš pouze rok, doplň jej rozumně (např. 2026-01-01). Pokud je vyfoceno více dokumentů, vezmi datum toho prvního. Pokud na celém dokumentu žádné datum opravdu není, použij rok obsažený v názvu souboru, případně dnešní datum jako absolutně poslední nouzi.
+5. KATEGORIE (category): Spáruj dokument s přesně jednou z následujících povolených kategorií: "Zdravotní", "Pracovní úřad", "Sociální zabezpečení", "Pracovní smlouvy", "Ostatní".`,
           temperature: 0.1,
           responseMimeType: "application/json",
           responseSchema: {
@@ -183,14 +208,9 @@ PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
               title: { type: Type.STRING },
               issuer: { type: Type.STRING },
               issueDate: { type: Type.STRING },
-              category: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              keyDetails: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING }
-              }
+              category: { type: Type.STRING }
             },
-            required: ["title", "issuer", "issueDate", "category", "summary", "keyDetails"]
+            required: ["title", "issuer", "issueDate", "category"]
           }
         }
       });
@@ -200,12 +220,26 @@ PŘÍSNÁ PRAVIDLA PRO ZABRÁNĚNÍ HALUCINACÍM:
       res.json(extractedData);
     } catch (error: any) {
       console.warn("Document extraction warning details:", error?.message || error);
+      debugErrors.push({
+        timestamp: new Date().toISOString(),
+        endpoint: "/api/extract-document",
+        errorMessage: error?.message || String(error),
+        errorStack: error?.stack
+      });
       res.json({ 
         isFallback: true,
         error: "Failed to process document image",
         message: error?.message || String(error)
       });
     }
+  });
+
+  // Diagnostic GET endpoint to check the latest errors
+  app.get("/api/debug-errors", (req, res) => {
+    res.json({
+      currentApiKeyMasked: API_KEY ? (API_KEY.substring(0, 7) + "..." + API_KEY.substring(API_KEY.length - 4)) : "None",
+      errors: debugErrors
+    });
   });
 
   // Persistent storage endpoints (workspace-level persistent JSON files)

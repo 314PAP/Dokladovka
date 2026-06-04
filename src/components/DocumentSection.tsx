@@ -24,6 +24,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { exportDocumentsToPDF } from '../utils/pdfExport';
 import { resizeAndCompressImage } from '../utils/imageCompressor';
 import { getSmartFallbackDocument } from '../utils/smartFallback';
+import { uploadPdfToGoogleDrive, createGoogleDocFromDocument } from '../utils/googleService';
 
 interface DocumentItem {
   id: string;
@@ -37,6 +38,7 @@ interface DocumentItem {
   fileName?: string;
   fileSize?: number;
   isFallback?: boolean;
+  fallbackError?: string;
 }
 
 interface DocQueueItem {
@@ -101,6 +103,9 @@ const mockDocChoices = [
 interface DocumentSectionProps {
   onBack: () => void;
   onPreviewImage: (src: string) => void;
+  userApiKey?: string;
+  googleAccessToken?: string | null;
+  googleUser?: any;
 }
 
 function FilePreview({ file }: { file: File }) {
@@ -126,7 +131,13 @@ function FilePreview({ file }: { file: File }) {
   );
 }
 
-export default function DocumentSection({ onBack, onPreviewImage }: DocumentSectionProps) {
+export default function DocumentSection({ 
+  onBack, 
+  onPreviewImage,
+  userApiKey,
+  googleAccessToken,
+  googleUser
+}: DocumentSectionProps) {
   const [documents, setDocuments] = useState<DocumentItem[]>(() => {
     try {
       const saved = localStorage.getItem('smart-documents') || localStorage.getItem('documents');
@@ -138,6 +149,12 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
     }
     return [];
   });
+
+  const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+  const [isSavingDocId, setIsSavingDocId] = useState<string | null>(null);
+  const [docDocUrls, setDocDocUrls] = useState<Record<string, string>>({});
+  const [isUploadingArchive, setIsUploadingArchive] = useState(false);
+  const [archiveUrl, setArchiveUrl] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanningTotal, setScanningTotal] = useState(0);
   const [scanningIndex, setScanningIndex] = useState(0);
@@ -162,12 +179,14 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
     }
   }, [docQueue]);
 
-  const fallbackDocumentCreation = async (fileName: string, base64Image?: string, fileSize?: number) => {
+  const fallbackDocumentCreation = async (fileName: string, base64Image?: string, fileSize?: number, fallbackError?: string) => {
     const smartData = getSmartFallbackDocument(fileName, fileSize);
     
     // Set warning flag
     localStorage.setItem('gemini-quota-warning', 'true');
     setShowQuotaWarning(true);
+
+    const errorText = fallbackError ? `: ${fallbackError}` : "vyčerpání limitu bezplatného API";
 
     const newDoc: DocumentItem = {
       id: 'DOC-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
@@ -175,12 +194,13 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
       issuer: smartData.issuer,
       issueDate: smartData.issueDate,
       category: smartData.category,
-      summary: smartData.summary + " (Poznámka: Aktivován lokální záložní režim kvůli vyčerpání limitu bezplatného API).",
+      summary: smartData.summary + ` (Poznámka: Aktivován lokální záložní režim. Důvod: ${errorText}).`,
       keyDetails: smartData.keyDetails,
       imageUrl: base64Image,
       fileName,
       fileSize,
-      isFallback: true
+      isFallback: true,
+      fallbackError
     };
     setDocuments(prev => [newDoc, ...prev]);
   };
@@ -226,7 +246,12 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
         console.warn("Queue process used fallback for item:", nextItem.name, err?.message || err);
         setDocQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'failed', error: err.message || "Chyba" } : item));
         
-        await fallbackDocumentCreation(nextItem.name, base64String || nextItem.virtualBase64 || undefined, nextItem.file?.size);
+        await fallbackDocumentCreation(
+          nextItem.name, 
+          base64String || nextItem.virtualBase64 || undefined, 
+          nextItem.file?.size,
+          err?.message || String(err)
+        );
         setDocQueue(prev => prev.map(item => item.id === nextItem.id ? { ...item, status: 'done' } : item));
       } finally {
         await new Promise(resolve => setTimeout(resolve, 350));
@@ -235,6 +260,56 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
 
     processItem();
   }, [docQueue]);
+
+  const handleSaveToGoogleDocs = async (docItem: DocumentItem) => {
+    if (!googleAccessToken) return;
+    setIsSavingDocId(docItem.id);
+    try {
+      const res = await createGoogleDocFromDocument(googleAccessToken, {
+        title: docItem.title,
+        issuer: docItem.issuer,
+        issueDate: docItem.issueDate,
+        category: docItem.category,
+        summary: docItem.summary || "Bez AI popisu.",
+        keyDetails: docItem.keyDetails || []
+      });
+      setDocDocUrls(prev => ({
+        ...prev,
+        [docItem.id]: res.url
+      }));
+      alert(`Dokument "${docItem.title}" byl úspěšně uložen do Google Dokumentů.`);
+    } catch (err: any) {
+      console.error(err);
+      alert(`Uložení do Google Dokumentů selhalo: ${err?.message || String(err)}`);
+    } finally {
+      setIsSavingDocId(null);
+    }
+  };
+
+  const handleUploadArchiveToDrive = async () => {
+    if (!googleAccessToken) return;
+    setIsUploadingArchive(true);
+    setArchiveUrl(null);
+    try {
+      const doc = exportDocumentsToPDF(sortedDocuments, filterFromDate, filterToDate);
+      if (!doc) {
+        throw new Error("Nepodařilo se vygenerovat PDF dokument.");
+      }
+      
+      const pdfBlob = doc.output("blob");
+      const fileName = `Archiv_Dokumentu_${filterFromDate || "vse"}_do_${filterToDate || "dnes"}.pdf`;
+      
+      const uploadRes = await uploadPdfToGoogleDrive(googleAccessToken, pdfBlob, fileName);
+      setArchiveUrl(uploadRes.url);
+      alert(`Archiv byl úspěšně nahrán na váš Disk!`);
+    } catch (err: any) {
+      console.error(err);
+      alert(`Nahrání archivu na Disk selhalo: ${err?.message || String(err)}`);
+    } finally {
+      setIsUploadingArchive(false);
+    }
+  };
+
   const [selectedDocCategory, setSelectedDocCategory] = useState<string | null>(null);
   const [expandedDocIds, setExpandedDocIds] = useState<Record<string, boolean>>({});
   const [filterFromDate, setFilterFromDate] = useState<string>('');
@@ -386,10 +461,14 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
   };
 
   const performDocumentExtraction = async (base64Image: string, fileName?: string, fileSize?: number) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (userApiKey) {
+      headers["x-gemini-key"] = userApiKey;
+    }
     // Call backend processing endpoint
     const response = await fetch("/api/extract-document", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ image: base64Image }),
     });
 
@@ -405,14 +484,18 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
     }
 
     const data = await response.json();
+    if (data.isFallback) {
+      throw new Error(data.message || data.error || "Server fallback mode");
+    }
+
     const newDoc: DocumentItem = {
       id: 'DOC-' + Math.random().toString(36).substr(2, 9).toUpperCase(),
       title: data.title || fileName || "Naskenovaný dokument",
       issuer: data.issuer || "Neznámý vydavatel",
       issueDate: data.issueDate || new Date().toISOString().split('T')[0],
       category: data.category || "Ostatní",
-      summary: data.summary || "Bez AI popisu.",
-      keyDetails: data.keyDetails || [],
+      summary: "",
+      keyDetails: [],
       imageUrl: base64Image,
       fileName,
       fileSize
@@ -875,14 +958,40 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
           </div>
         </div>
         
-        <button
-          onClick={() => exportDocumentsToPDF(sortedDocuments, filterFromDate, filterToDate)}
-          disabled={sortedDocuments.length === 0}
-          className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-semibold text-sm shadow-md transition-all cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <Download size={16} />
-          <span>Exportovat archiv (PDF)</span>
-        </button>
+        <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto shrink-0 items-center">
+          {archiveUrl && (
+            <div className="text-xs text-emerald-600 font-bold bg-emerald-50 px-3.5 py-2 rounded-xl border border-emerald-150 flex items-center gap-1 mr-2 animate-fade-in shrink-0">
+              <span>Archiv uložen!</span>
+              <a href={archiveUrl} target="_blank" rel="noreferrer" className="underline hover:text-emerald-800 font-medium">
+                Otevřít Disk &rarr;
+              </a>
+            </div>
+          )}
+
+          <button
+            onClick={() => exportDocumentsToPDF(sortedDocuments, filterFromDate, filterToDate)}
+            disabled={sortedDocuments.length === 0}
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-semibold text-sm shadow-md transition-all cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Download size={16} />
+            <span>Exportovat archiv (PDF)</span>
+          </button>
+          
+          {googleAccessToken && (
+            <button
+              onClick={handleUploadArchiveToDrive}
+              disabled={sortedDocuments.length === 0 || isUploadingArchive}
+              className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl font-semibold text-sm shadow-md transition-all cursor-pointer whitespace-nowrap shrink-0 border border-emerald-500"
+            >
+              {isUploadingArchive ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <FolderOpen size={16} />
+              )}
+              <span>Nahrát na Google Disk</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Documents Grid / Main List */}
@@ -935,8 +1044,11 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
                           <h3 className="font-bold text-slate-900 text-sm md:text-base flex flex-wrap items-center gap-1.5 leading-tight">
                             {doc.title}
                             {doc.isFallback && (
-                              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100">
-                                Simulováno (API Quota Limit)
+                              <span 
+                                title={doc.fallbackError ? `Chyba API: ${doc.fallbackError}` : "Zapnut automatický záložní režim pro úsporu tokenů"}
+                                className="inline-flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-50 text-[10px] font-bold text-amber-600 rounded-lg border border-amber-100 cursor-help"
+                              >
+                                {doc.fallbackError ? "Simulováno (Chyba API)" : "Simulováno (API Quota Limit)"}
                               </span>
                             )}
                           </h3>
@@ -957,51 +1069,65 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
                       <span>Vydáno: {new Date(doc.issueDate).toLocaleDateString('cs-CZ')}</span>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={(e) => toggleExpand(doc.id, e)}
-                      className="w-full flex items-center justify-between text-xs font-semibold text-indigo-600 bg-indigo-50/75 hover:bg-indigo-100 p-2.5 rounded-xl transition-all cursor-pointer border border-indigo-100/50 mt-1"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <span className="relative flex h-2 w-2">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-                        </span>
-                        <span>AI Rozbor &amp; Shrnující Obsah</span>
-                      </span>
-                      {expandedDocIds[doc.id] ? <ChevronUp size={14} className="shrink-0" /> : <ChevronDown size={14} className="shrink-0" />}
-                    </button>
-
-                    <AnimatePresence initial={false}>
-                      {expandedDocIds[doc.id] && (
-                        <motion.div
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: "auto", opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          className="overflow-hidden space-y-3 pt-1"
-                        >
-                          <div className="text-xs text-slate-600 leading-relaxed bg-white/90 border border-slate-200/40 rounded-xl p-3 shadow-xs">
-                            <strong className="text-indigo-750 block mb-1">AI Shrnující obsah:</strong>
-                            {doc.summary}
+                    {/* Collapsible Details Panel */}
+                    {expandedDocId === doc.id && (
+                      <div className="bg-slate-50 rounded-2xl p-4 mt-3 border border-slate-200/50 text-xs text-slate-600 space-y-3.5">
+                        {doc.summary && (
+                          <div>
+                            <div className="font-bold text-slate-700 uppercase tracking-wide text-[9px] mb-1">AI Souhrn obsahu</div>
+                            <p className="leading-relaxed">{doc.summary}</p>
                           </div>
-
-                          {doc.keyDetails && doc.keyDetails.length > 0 && (
-                            <div className="space-y-1.5 bg-white/50 border border-slate-200/20 rounded-xl p-3">
-                              <strong className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">Klíčové parametry:</strong>
+                        )}
+                        {doc.keyDetails && doc.keyDetails.length > 0 && (
+                          <div>
+                            <div className="font-bold text-slate-700 uppercase tracking-wide text-[9px] mb-1">Klíčové parametry doložení</div>
+                            <ul className="list-disc pl-4 space-y-1">
                               {doc.keyDetails.map((detail, idx) => (
-                                <div key={idx} className="flex items-start gap-2 text-xs text-slate-700 font-medium">
-                                  <CheckCircle2 size={14} className="text-emerald-500 shrink-0 mt-0.5" />
-                                  <span>{detail}</span>
-                                </div>
+                                <li key={idx}>{detail}</li>
                               ))}
-                            </div>
-                          )}
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
+                            </ul>
+                          </div>
+                        )}
+                        
+                        {/* Google Docs button */}
+                        {googleAccessToken ? (
+                          <div className="pt-2.5 border-t border-slate-200/60 flex items-center justify-between gap-2">
+                            <button
+                              onClick={() => handleSaveToGoogleDocs(doc)}
+                              disabled={isSavingDocId === doc.id}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg font-bold text-[10px] transition-colors cursor-pointer"
+                            >
+                              {isSavingDocId === doc.id ? "Ukládám..." : "Uložit do Google Dokumentů"}
+                            </button>
+                            
+                            {docDocUrls[doc.id] && (
+                              <a 
+                                href={docDocUrls[doc.id]} 
+                                target="_blank" 
+                                rel="noreferrer"
+                                className="text-[10px] text-emerald-600 hover:underline font-bold"
+                              >
+                                Otevřít dokument &rarr;
+                              </a>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-slate-400 italic pt-1 border-t border-slate-200/40">
+                            Pro uložení doložení jako Google Dokument se nejprve přihlaste ve vašem nastavení.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
 
-                  <div className="flex justify-end pt-3 border-t border-slate-200/40">
+                  <div className="flex justify-between items-center pt-3 border-t border-slate-200/40">
+                    <button 
+                      onClick={() => setExpandedDocId(expandedDocId === doc.id ? null : doc.id)}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      {expandedDocId === doc.id ? "Skrýt detaily" : "Zobrazit AI detaily"}
+                    </button>
+                    
                     <button 
                       onClick={(e) => deleteDocument(doc.id, e)}
                       className="p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700 rounded-lg transition-colors text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
@@ -1087,49 +1213,64 @@ export default function DocumentSection({ onBack, onPreviewImage }: DocumentSect
                           <span>Vydáno: {new Date(doc.issueDate).toLocaleDateString('cs-CZ')}</span>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={(e) => toggleExpand(doc.id, e)}
-                          className="w-full flex items-center justify-between text-xs font-semibold text-indigo-600 bg-indigo-50/75 hover:bg-indigo-100 p-2.5 rounded-xl transition-all cursor-pointer border border-indigo-100/50 mt-1"
-                        >
-                          <span className="flex items-center gap-1.5">
-                            <span className="relative flex h-2 w-2">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-                            </span>
-                            <span>AI Rozbor &amp; Popis Doložení</span>
-                          </span>
-                          {expandedDocIds[doc.id] ? <ChevronUp size={14} className="shrink-0" /> : <ChevronDown size={14} className="shrink-0" />}
-                        </button>
-
-                        <AnimatePresence initial={false}>
-                          {expandedDocIds[doc.id] && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              className="overflow-hidden space-y-3 pt-1"
-                            >
-                              <div className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 rounded-xl p-4 italic shadow-xs">
-                                <strong className="text-indigo-600 block mb-1">AI Popis doložení: </strong>{doc.summary}
+                        {/* Collapsible Details Panel inside Folder View */}
+                        {expandedDocId === doc.id && (
+                          <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/50 text-xs text-slate-600 space-y-3.5">
+                            {doc.summary && (
+                              <div>
+                                <div className="font-bold text-slate-700 uppercase tracking-wide text-[9px] mb-1">AI Souhrn obsahu</div>
+                                <p className="leading-relaxed">{doc.summary}</p>
                               </div>
-
-                              {doc.keyDetails && doc.keyDetails.length > 0 && (
-                                <div className="space-y-1.5 bg-slate-50 border border-slate-150 rounded-xl p-3">
-                                  <strong className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">Klíčové parametry:</strong>
+                            )}
+                            {doc.keyDetails && doc.keyDetails.length > 0 && (
+                              <div>
+                                <div className="font-bold text-slate-700 uppercase tracking-wide text-[9px] mb-1">Klíčové parametry doložení</div>
+                                <ul className="list-disc pl-4 space-y-1">
                                   {doc.keyDetails.map((detail, idx) => (
-                                    <div key={idx} className="flex items-start gap-2 text-xs text-slate-700">
-                                      <CheckCircle2 size={14} className="text-emerald-500 shrink-0 mt-0.5" />
-                                      <span>{detail}</span>
-                                    </div>
+                                    <li key={idx}>{detail}</li>
                                   ))}
-                                </div>
-                              )}
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
+                                </ul>
+                              </div>
+                            )}
+                            
+                            {/* Google Docs button */}
+                            {googleAccessToken ? (
+                              <div className="pt-2.5 border-t border-slate-200/60 flex items-center justify-between gap-2">
+                                <button
+                                  onClick={() => handleSaveToGoogleDocs(doc)}
+                                  disabled={isSavingDocId === doc.id}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg font-bold text-[10px] transition-colors cursor-pointer"
+                                >
+                                  {isSavingDocId === doc.id ? "Ukládám..." : "Uložit do Google Dokumentů"}
+                                </button>
+                                
+                                {docDocUrls[doc.id] && (
+                                  <a 
+                                    href={docDocUrls[doc.id]} 
+                                    target="_blank" 
+                                    rel="noreferrer"
+                                    className="text-[10px] text-emerald-600 hover:underline font-bold"
+                                  >
+                                    Otevřít dokument &rarr;
+                                  </a>
+                                )}
+                              </div>
+                            ) : (
+                              <p className="text-[10px] text-slate-400 italic pt-1 border-t border-slate-200/40">
+                                Pro uložení doložení jako Google Dokument se nejprve přihlaste ve vašem nastavení.
+                              </p>
+                            )}
+                          </div>
+                        )}
 
-                        <div className="flex justify-end pt-2 border-t border-slate-100">
+                        <div className="flex justify-between items-center pt-3 border-t border-slate-100">
+                          <button 
+                            onClick={() => setExpandedDocId(expandedDocId === doc.id ? null : doc.id)}
+                            className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            {expandedDocId === doc.id ? "Skrýt detaily" : "Zobrazit AI detaily"}
+                          </button>
+                          
                           <button 
                             onClick={(e) => deleteDocument(doc.id, e)}
                             className="text-xs text-red-500 hover:text-red-700 font-semibold flex items-center gap-1 cursor-pointer"
