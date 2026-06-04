@@ -24,6 +24,10 @@ interface GoogleSettingsProps {
   setGoogleUser: (user: any) => void;
   accessToken: string | null;
   setAccessToken: (token: string | null) => void;
+  googleAccounts: any[];
+  setGoogleAccounts: React.Dispatch<React.SetStateAction<any[]>>;
+  activeAccountIndex: number;
+  setActiveAccountIndex: (idx: number) => void;
   onBack?: () => void;
 }
 
@@ -36,6 +40,10 @@ export default function GoogleSettings({
   setGoogleUser,
   accessToken,
   setAccessToken,
+  googleAccounts,
+  setGoogleAccounts,
+  activeAccountIndex,
+  setActiveAccountIndex,
   onBack
 }: GoogleSettingsProps) {
   const [showInstructions, setShowInstructions] = useState(false);
@@ -112,10 +120,18 @@ export default function GoogleSettings({
   };
 
   const handleLogout = () => {
-    setAccessToken(null);
-    setGoogleUser(null);
-    localStorage.removeItem("dokladovka-google-user");
-    triggerNotification("Byl jste úspěšně odhlášen.");
+    const updated = googleAccounts.filter((_, idx) => idx !== activeAccountIndex);
+    setGoogleAccounts(updated);
+    localStorage.setItem("dokladovka-google-accounts", JSON.stringify(updated));
+    const nextIndex = Math.max(0, updated.length - 1);
+    setActiveAccountIndex(nextIndex);
+    localStorage.setItem("dokladovka-active-account-index", String(nextIndex));
+    if (updated.length === 0) {
+      localStorage.removeItem("dokladovka-google-user");
+      setAccessToken(null);
+      setGoogleUser(null);
+    }
+    triggerNotification("Účet byl odhlášen.");
   };
 
   const handleSaveApiKeys = () => {
@@ -191,47 +207,102 @@ export default function GoogleSettings({
             Propojený Google Účet
           </h2>
 
-          {accessToken && googleUser ? (
-            <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-5">
-              <div className="flex items-center gap-4">
-                {googleUser.picture ? (
-                  <img 
-                    src={googleUser.picture} 
-                    alt={googleUser.name} 
-                    className="w-14 h-14 rounded-full border border-slate-200 shadow-xs"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <div className="w-14 h-14 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xl">
-                    <User size={24} />
+                  {googleAccounts.length > 0 ? (
+            <div className="space-y-4">
+              <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-5">
+                <div className="flex items-center gap-4">
+                  {googleUser?.picture ? (
+                    <img 
+                      src={googleUser.picture} 
+                      alt={googleUser.name} 
+                      className="w-14 h-14 rounded-full border border-slate-200 shadow-sm"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <div className="w-14 h-14 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xl">
+                      <User size={24} />
+                    </div>
+                  )}
+                  <div className="text-left">
+                    <h3 className="font-bold text-slate-800 text-base">{googleUser?.name || "Uživatel Google"}</h3>
+                    <p className="text-slate-500 text-sm font-medium">{googleUser?.email || "E-mail nedostupný"}</p>
+                    <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1 mt-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      Propojeno k Google Drive (Aktivní)
+                    </p>
                   </div>
-                )}
-                <div>
-                  <h3 className="font-bold text-slate-800 text-base">{googleUser.name || "Uživatel Google"}</h3>
-                  <p className="text-slate-500 text-sm font-medium">{googleUser.email || "E-mail nedostupný"}</p>
-                  <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1 mt-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    Připojeno k Google Drive & Docs (Aktivní)
-                  </p>
                 </div>
+
+                <button 
+                  onClick={handleLogout}
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 bg-slate-150 hover:bg-rose-50 text-slate-600 hover:text-rose-600 rounded-xl font-bold text-xs transition-colors cursor-pointer border border-slate-200 whitespace-nowrap"
+                >
+                  <LogOut size={14} />
+                  Odhlásit tento účet
+                </button>
               </div>
 
-              <button 
-                onClick={handleLogout}
-                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-slate-150 hover:bg-red-50 text-slate-600 hover:text-red-600 rounded-xl font-bold text-xs transition-colors cursor-pointer border border-slate-200"
-              >
-                <LogOut size={14} />
-                Odhlásit se
-              </button>
+              {/* Other logged-in accounts */}
+              {googleAccounts.length > 1 && (
+                <div className="space-y-2 bg-slate-50/50 p-4 rounded-2xl border border-slate-200/50">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider text-left">
+                    Ostatní připojené účty (kliknutím přepnete):
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {googleAccounts.map((acc, index) => {
+                      if (index === activeAccountIndex) return null;
+                      return (
+                        <div 
+                          key={acc.user.email} 
+                          onClick={() => {
+                            setActiveAccountIndex(index);
+                            localStorage.setItem("dokladovka-active-account-index", String(index));
+                            triggerNotification(`Přepnuto na účet: ${acc.user.name}`);
+                          }}
+                          className="flex items-center justify-between p-2.5 bg-white border border-slate-200 hover:border-indigo-400 rounded-xl transition-all cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2 text-left truncate">
+                            {acc.user.picture ? (
+                              <img src={acc.user.picture} alt="" className="w-6 h-6 rounded-full" referrerPolicy="no-referrer" />
+                            ) : (
+                              <div className="w-6 h-6 rounded-full bg-indigo-900 flex items-center justify-center text-[10px] font-bold text-indigo-300">
+                                {acc.user.email.substring(0, 2).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="truncate">
+                              <p className="text-xs font-bold text-slate-700 truncate">{acc.user.name}</p>
+                              <p className="text-[9px] text-slate-400 truncate">{acc.user.email}</p>
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-indigo-500 font-semibold hover:underline px-2">
+                            Přepnout
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Add account button inside settings */}
+              <div className="pt-2 flex justify-start">
+                <button
+                  type="button"
+                  onClick={handleGoogleLogin}
+                  className="px-4 py-2 border border-indigo-200 hover:bg-indigo-50 text-indigo-600 rounded-xl font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  + Připojit další Google účet
+                </button>
+              </div>
             </div>
           ) : (
             <div className="bg-amber-50/50 border border-amber-200/50 rounded-2xl p-5 space-y-4">
-              <div className="flex gap-3">
+              <div className="flex gap-3 text-left">
                 <AlertCircle className="text-amber-500 shrink-0 mt-0.5" size={20} />
                 <div className="space-y-1">
                   <h3 className="font-bold text-amber-800 text-sm">Nejste přihlášeni k Google</h3>
-                  <p className="text-slate-650 text-xs leading-relaxed">
-                    Přihlášením propojíte Dokladovku se svým Google Diskem (Google Drive) a Google Dokumenty (Google Docs). To vám umožní okamžitě ukládat vyexportované reporty a digitalizované materiály bezpečně přímo na váš internetový cloud.
+                  <p className="text-slate-600 text-xs leading-relaxed">
+                    Přihlášením propojíte Dokladovku se svým Google Diskem (Google Drive) a Google Dokumenty (Google Docs). To vám umožní automaticky synchronizovat a zálohovat vaše doklady a přistupovat k nim z jakéhokoliv cloudu a zařízení.
                   </p>
                 </div>
               </div>
@@ -245,7 +316,7 @@ export default function GoogleSettings({
                   Přihlásit se přes Google
                 </button>
               ) : (
-                <p className="text-xs text-slate-400 italic">
+                <p className="text-xs text-slate-400 italic text-left">
                   Pro aktivaci Google přihlášení nejprve vyplňte vaše Google Client ID v políčku níže.
                 </p>
               )}

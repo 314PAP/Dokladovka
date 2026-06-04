@@ -1,6 +1,6 @@
 {
   "name": "DOKLADOVKA",
-  "description": "Chytrý správce nákupů se simulovaným AI OCR přepisem položek z účtenek, kategorizací a měsíčním přehledem výdajů.",
+  "description": "Chytrý správce účtenek a osobních dokumentů se synchronizací a zálohou přímo na osobní Google Disk vyvinutý pro PIPAP.cz.",
   "requestFramePermissions": ["camera"],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

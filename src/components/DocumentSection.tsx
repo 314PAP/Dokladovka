@@ -106,6 +106,8 @@ interface DocumentSectionProps {
   userApiKey?: string;
   googleAccessToken?: string | null;
   googleUser?: any;
+  documents: DocumentItem[];
+  setDocuments: React.Dispatch<React.SetStateAction<DocumentItem[]>>;
 }
 
 function FilePreview({ file }: { file: File }) {
@@ -136,20 +138,10 @@ export default function DocumentSection({
   onPreviewImage,
   userApiKey,
   googleAccessToken,
-  googleUser
+  googleUser,
+  documents,
+  setDocuments
 }: DocumentSectionProps) {
-  const [documents, setDocuments] = useState<DocumentItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('smart-documents') || localStorage.getItem('documents');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.error("Failed to load documents from localStorage:", e);
-    }
-    return [];
-  });
-
   const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
   const [isSavingDocId, setIsSavingDocId] = useState<string | null>(null);
   const [docDocUrls, setDocDocUrls] = useState<Record<string, string>>({});

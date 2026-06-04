@@ -3,3 +3,5 @@
 @theme {
   --breakpoint-xs: 475px;
 }
+
+@variant dark (&:where(.dark, .dark *));

@@ -30,7 +30,11 @@ import {
   Calendar,
   Download,
   AlertTriangle,
-  Settings
+  Settings,
+  Sun,
+  Moon,
+  Mail,
+  User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import DocumentSection from './components/DocumentSection';
@@ -38,6 +42,11 @@ import GoogleSettings from './components/GoogleSettings';
 import { exportExpensesToPDF } from './utils/pdfExport';
 import { resizeAndCompressImage } from './utils/imageCompressor';
 import { getSmartFallbackReceipt } from './utils/smartFallback';
+import { 
+  findSyncFile, 
+  downloadUserDataFromGoogleDrive, 
+  saveUserDataToGoogleDrive 
+} from './utils/googleService';
 
 interface ReceiptItem {
   name: string;
@@ -164,20 +173,180 @@ function FilePreview({ file }: { file: File }) {
 }
 
 export default function App() {
-  const [activeSection, setActiveSection] = useState<'selection' | 'receipts' | 'documents' | 'settings'>('selection');
+  const [darkMode, setDarkMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("dokladovka-dark-mode") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("dokladovka-dark-mode", darkMode ? "true" : "false");
+      if (darkMode) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, [darkMode]);
+
+  const [activeSection, setActiveSection] = useState<'welcome' | 'selection' | 'receipts' | 'documents' | 'settings'>(() => {
+    try {
+      const accountsSaved = localStorage.getItem("dokladovka-google-accounts");
+      const accounts = accountsSaved ? JSON.parse(accountsSaved) : [];
+      return accounts.length > 0 ? 'selection' : 'welcome';
+    } catch {
+      return 'welcome';
+    }
+  });
+
+  const [welcomeEmail, setWelcomeEmail] = useState("telefoncapi@gmail.com");
+  const [welcomeName, setWelcomeName] = useState("");
   
   // Google / Custom credentials states
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("dokladovka-user-api-key") || "");
   const [googleClientId, setGoogleClientId] = useState(() => localStorage.getItem("dokladovka-google-client-id") || "");
-  const [googleUser, setGoogleUser] = useState<any>(() => {
+  
+  // Multiple Google accounts state
+  const [googleAccounts, setGoogleAccounts] = useState<any[]>(() => {
     try {
-      const saved = localStorage.getItem("dokladovka-google-user");
-      return saved ? JSON.parse(saved) : null;
+      const saved = localStorage.getItem("dokladovka-google-accounts");
+      if (saved) return JSON.parse(saved);
+      
+      const legacyUser = localStorage.getItem("dokladovka-google-user");
+      if (legacyUser) {
+        const u = JSON.parse(legacyUser);
+        const legacyAcc = {
+          user: u,
+          accessToken: "",
+          clientId: localStorage.getItem("dokladovka-google-client-id") || "",
+          loginTime: Date.now()
+        };
+        return [legacyAcc];
+      }
     } catch {
-      return null;
+      // safe fallback
+    }
+    return [];
+  });
+
+  const [activeAccountIndex, setActiveAccountIndex] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("dokladovka-active-account-index");
+      return saved ? parseInt(saved, 10) : 0;
+    } catch {
+      return 0;
     }
   });
-  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+
+  const activeAccount = googleAccounts[activeAccountIndex] || googleAccounts[0] || null;
+  const googleUser = activeAccount ? activeAccount.user : null;
+  const googleAccessToken = activeAccount ? activeAccount.accessToken : null;
+
+  // Compat states to keep any down-stream variables references unbroken 
+  const [googleUserCompat, setGoogleUserCompat] = useState<any>(null);
+  const [googleAccessTokenCompat, setGoogleAccessTokenCompat] = useState<string | null>(null);
+
+  useEffect(() => {
+    setGoogleUserCompat(googleUser);
+    setGoogleAccessTokenCompat(googleAccessToken);
+  }, [googleUser, googleAccessToken]);
+
+  const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+
+  // Sync receipts & documents state
+  const [documents, setDocuments] = useState<DocumentItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('smart-documents') || localStorage.getItem('documents');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Failed to load documents from localStorage:", e);
+    }
+    return [];
+  });
+
+  // Helper to merge receipts securely (avoid duplicates by ID)
+  const mergeReceipts = (local: Receipt[], server: Receipt[]) => {
+    const map = new Map<string, Receipt>();
+    local.forEach(r => map.set(r.id, r));
+    server.forEach(r => map.set(r.id, r));
+    return Array.from(map.values());
+  };
+
+  // Helper to merge documents securely
+  const mergeDocuments = (local: DocumentItem[], server: DocumentItem[]) => {
+    const map = new Map<string, DocumentItem>();
+    local.forEach(d => map.set(d.id, d));
+    server.forEach(d => map.set(d.id, d));
+    return Array.from(map.values());
+  };
+
+  // Seamless pull backup data from Google Drive
+  const syncFromGoogleDriveDirectly = async (tokenToUse: string) => {
+    if (!tokenToUse) return;
+    setIsCloudSyncing(true);
+    try {
+      console.log("Searching for backup file on Google Drive...");
+      const fileId = await findSyncFile(tokenToUse);
+      if (fileId) {
+        const cloudData = await downloadUserDataFromGoogleDrive(tokenToUse, fileId);
+        if (cloudData) {
+          console.log("Backup found! Synchronizing databases...");
+          
+          // Cloud settings restore to make multi-device use automatic
+          const extendedData = cloudData as any;
+          if (extendedData.userApiKey && !localStorage.getItem("dokladovka-user-api-key")) {
+            setUserApiKey(extendedData.userApiKey);
+            localStorage.setItem("dokladovka-user-api-key", extendedData.userApiKey);
+          }
+          if (extendedData.googleClientId && !localStorage.getItem("dokladovka-google-client-id")) {
+            setGoogleClientId(extendedData.googleClientId);
+            localStorage.setItem("dokladovka-google-client-id", extendedData.googleClientId);
+          }
+
+          if (Array.isArray(cloudData.receipts)) {
+            setReceipts(prev => {
+              const merged = mergeReceipts(prev, cloudData.receipts);
+              localStorage.setItem('smart-receipts', JSON.stringify(merged));
+              return merged;
+            });
+          }
+          
+          if (Array.isArray(cloudData.documents)) {
+            setDocuments(prev => {
+              const merged = mergeDocuments(prev, cloudData.documents);
+              localStorage.setItem('smart-documents', JSON.stringify(merged));
+              return merged;
+            });
+          }
+        }
+      } else {
+        console.log("No cloud sync file found. Uploading current state as initial backup...");
+        const currentLocalReceipts = JSON.parse(localStorage.getItem('smart-receipts') || '[]');
+        const currentLocalDocs = JSON.parse(localStorage.getItem('smart-documents') || '[]');
+        if (currentLocalReceipts.length > 0 || currentLocalDocs.length > 0) {
+          await saveUserDataToGoogleDrive(tokenToUse, { receipts: currentLocalReceipts, documents: currentLocalDocs });
+          console.log("Initial backup completed!");
+        }
+      }
+    } catch (err) {
+      console.error("Cloud synchronisation failed safely:", err);
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (googleAccessToken) {
+      syncFromGoogleDriveDirectly(googleAccessToken);
+    }
+  }, [googleAccessToken]);
 
   useEffect(() => {
     if (window.location.hash) {
@@ -191,8 +360,7 @@ export default function App() {
           window.location.pathname + window.location.search
         );
         
-        setGoogleAccessToken(token);
-        setActiveSection('settings');
+        setActiveSection('selection');
         
         fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
           headers: { Authorization: `Bearer ${token}` }
@@ -201,9 +369,36 @@ export default function App() {
           if (!r.ok) throw new Error("Profil se nepodařilo stáhnout");
           return r.json();
         })
-        .then(user => {
-          setGoogleUser(user);
+        .then(async (user) => {
+          setGoogleAccounts(prev => {
+            const index = prev.findIndex(acc => acc.user.email === user.email);
+            const newAcc = {
+              user,
+              accessToken: token,
+              clientId: localStorage.getItem("dokladovka-google-client-id") || "",
+              loginTime: Date.now()
+            };
+            let updated;
+            if (index > -1) {
+              updated = [...prev];
+              updated[index] = newAcc;
+              setActiveAccountIndex(index);
+              localStorage.setItem("dokladovka-active-account-index", String(index));
+            } else {
+              updated = [...prev, newAcc];
+              const newIndex = updated.length - 1;
+              setActiveAccountIndex(newIndex);
+              localStorage.setItem("dokladovka-active-account-index", String(newIndex));
+            }
+            localStorage.setItem("dokladovka-google-accounts", JSON.stringify(updated));
+            return updated;
+          });
+
+          // Save compatibility states
           localStorage.setItem("dokladovka-google-user", JSON.stringify(user));
+
+          // Run pull after account setup
+          await syncFromGoogleDriveDirectly(token);
         })
         .catch(err => {
           console.error("Chyba Google Profilu:", err);
@@ -211,6 +406,49 @@ export default function App() {
       }
     }
   }, []);
+
+  const handleVirtualLogin = (email: string, name: string) => {
+    const formattedEmail = email.trim().toLowerCase();
+    if (!formattedEmail) {
+      alert("Pro přihlášení prosím uveďte e-mail.");
+      return;
+    }
+    const formattedName = name.trim() || formattedEmail.split('@')[0];
+    
+    const virtualUser = {
+      name: formattedName,
+      email: formattedEmail,
+      picture: "", // empty, which will generate a beautiful generic initial avatar inside the app
+    };
+
+    setGoogleAccounts(prev => {
+      const index = prev.findIndex(acc => acc.user.email === formattedEmail);
+      const newAcc = {
+        user: virtualUser,
+        accessToken: null, // Virtual account has no token initially
+        clientId: googleClientId || "",
+        loginTime: Date.now()
+      };
+      
+      let updated;
+      if (index > -1) {
+        updated = [...prev];
+        updated[index] = newAcc;
+        setActiveAccountIndex(index);
+        localStorage.setItem("dokladovka-active-account-index", String(index));
+      } else {
+        updated = [...prev, newAcc];
+        const newIndex = updated.length - 1;
+        setActiveAccountIndex(newIndex);
+        localStorage.setItem("dokladovka-active-account-index", String(newIndex));
+      }
+      localStorage.setItem("dokladovka-google-accounts", JSON.stringify(updated));
+      return updated;
+    });
+
+    localStorage.setItem("dokladovka-google-user", JSON.stringify(virtualUser));
+    setActiveSection('selection');
+  };
 
   const [receipts, setReceipts] = useState<Receipt[]>(() => {
     try {
@@ -365,14 +603,6 @@ export default function App() {
   const [docSummary, setDocSummary] = useState('');
   const [docDetailsRaw, setDocDetailsRaw] = useState('');
 
-  // Helper to merge receipts securely (avoid duplicates by ID)
-  const mergeReceipts = (local: Receipt[], server: Receipt[]) => {
-    const map = new Map<string, Receipt>();
-    local.forEach(r => map.set(r.id, r));
-    server.forEach(r => map.set(r.id, r));
-    return Array.from(map.values());
-  };
-
   // Sync receipts with backend on mount
   useEffect(() => {
     let active = true;
@@ -431,6 +661,53 @@ export default function App() {
 
     return () => clearTimeout(timeoutId);
   }, [receipts]);
+
+  // Persistence: Save documents to localStorage & server backend
+  useEffect(() => {
+    try {
+      localStorage.setItem('smart-documents', JSON.stringify(documents));
+    } catch (e) {
+      console.warn("Storage quota exceeded. Saving text metadata locally to avoid page crash.", e);
+      try {
+        const textOnlyDocs = documents.map(d => ({ ...d, imageUrl: undefined }));
+        localStorage.setItem('smart-documents', JSON.stringify(textOnlyDocs));
+      } catch (err) {
+        console.error("Failsafe local storage write failed:", err);
+      }
+    }
+    
+    // Debounce backend write to prevent overlapping massive POST payloads
+    const timeoutId = setTimeout(() => {
+      fetch("/api/db/documents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documents }),
+      }).catch(err => console.error("Error backing up documents to server:", err));
+    }, 1200);
+
+    return () => clearTimeout(timeoutId);
+  }, [documents]);
+
+  // Unified debounced auto-save directly to user's Google Drive!
+  useEffect(() => {
+    if (!googleAccessToken) return;
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        console.log("Saving latest receipts and documents to Google Drive...");
+        const backupPayload: any = { receipts, documents };
+        if (userApiKey) backupPayload.userApiKey = userApiKey;
+        if (googleClientId) backupPayload.googleClientId = googleClientId;
+        
+        await saveUserDataToGoogleDrive(googleAccessToken, backupPayload);
+        console.log("Google Drive successfully synchronized.");
+      } catch (err) {
+        console.error("Auto-sync to Google Drive failed:", err);
+      }
+    }, 3000);
+
+    return () => clearTimeout(timeoutId);
+  }, [receipts, documents, googleAccessToken, userApiKey, googleClientId]);
 
   // Simulated AI Data Pool for Receipts
   const mockAIChoices = [
@@ -747,6 +1024,207 @@ export default function App() {
     return summary;
   }, [filteredReceipts]);
 
+  if (activeSection === 'welcome') {
+    return (
+      <div className={`min-h-screen ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-white text-slate-800'} font-sans flex flex-col justify-between p-4 md:p-8 transition-colors duration-200`}>
+        {/* Top Navbar */}
+        <div className="w-full max-w-4xl mx-auto flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-1.5 text-left">
+            <span className="p-1.5 bg-blue-600 rounded-lg text-white font-black text-xs shadow-md">
+              D
+            </span>
+            <div className="leading-none">
+              <span className="font-extrabold tracking-tight text-slate-900 dark:text-white text-sm md:text-base">DOKLADOVKA</span>
+              <span className="block text-[8px] font-bold text-slate-400 dark:text-slate-500 tracking-wider">vyrobil PIPAP.CZ</span>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] text-blue-600 dark:text-blue-400 font-extrabold bg-blue-50 dark:bg-blue-950/40 px-3 py-1 rounded-full border border-blue-100 dark:border-blue-900/30">
+              PIPAP.CZ
+            </span>
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="p-2 rounded-xl bg-slate-100 dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:scale-105 transition-all text-xs border border-slate-200 dark:border-slate-800 cursor-pointer flex items-center justify-center"
+              title={darkMode ? "Přepnout do světlého režimu" : "Přepnout do tmavého režimu"}
+            >
+              {darkMode ? <Sun size={14} className="text-yellow-400" /> : <Moon size={14} className="text-blue-600" />}
+            </button>
+          </div>
+        </div>
+
+        {/* TOP: Login Section */}
+        <div className="w-full max-w-lg mx-auto py-8 space-y-6">
+          <div className={`rounded-3xl p-6 md:p-8 shadow-xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200/50'} text-center space-y-6`}>
+            
+            <div className="space-y-2">
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white">Přihlášení &amp; Cloudová Synchronizace</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs mx-auto leading-relaxed">
+                Mějte své doklady k dispozici z jakéhokoli zařízení! Vaše data se zálohují bezpečně přímo do vašeho osobního Google Disku.
+              </p>
+            </div>
+
+            {/* Login Button using Google authentication and Blue branding color */}
+            <div className="space-y-4">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!googleClientId.trim()) {
+                    alert("Před přihlášením prosím zadejte Google Client ID níže v rozbalovacím políčku.");
+                    return;
+                  }
+                  const redirectUri = window.location.origin;
+                  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
+                    client_id: googleClientId.trim(),
+                    redirect_uri: redirectUri,
+                    response_type: "token",
+                    scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
+                    state: "google_login",
+                    prompt: "select_account"
+                  }).toString();
+                  window.location.href = authUrl;
+                }}
+                className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 cursor-pointer"
+              >
+                <ShoppingBag size={18} />
+                <span>Přihlásit se svým Google účtem</span>
+              </button>
+
+              {/* If there are existing accounts logged in locally */}
+              {googleAccounts.length > 0 && (
+                <div className="space-y-2 text-left pt-2">
+                  <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                    Uložené účty v tomto prohlížeči:
+                  </p>
+                  <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                    {googleAccounts.map((acc, index) => (
+                      <div 
+                        key={acc.user.email} 
+                        className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${darkMode ? 'bg-slate-950 border-slate-800 hover:border-blue-700' : 'bg-white border-slate-200 hover:border-blue-400'}`}
+                        onClick={() => {
+                          setActiveAccountIndex(index);
+                          localStorage.setItem("dokladovka-active-account-index", String(index));
+                          setActiveSection('selection');
+                        }}
+                      >
+                        <div className="flex items-center gap-2.5 text-left max-w-[70%]">
+                          {acc.user.picture ? (
+                            <img src={acc.user.picture} alt="" className="w-7 h-7 rounded-full" referrerPolicy="no-referrer" />
+                          ) : (
+                            <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 flex items-center justify-center text-xs font-bold animate-pulse">
+                              {acc.user.email.substring(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="truncate">
+                            <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">{acc.user.name}</p>
+                            <p className="text-[9px] text-slate-500 dark:text-slate-400 truncate">{acc.user.email}</p>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-0.5">
+                          Vstoupit &rarr;
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Collapsible Client ID section on demand */}
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-800/60 text-left">
+                <details className="group">
+                  <summary className="text-xs text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 font-semibold list-none flex items-center gap-1 cursor-pointer select-none">
+                    <span className="transition-transform group-open:rotate-90">&rtrif;</span>
+                    <span>Potřebujete nastavit / změnit Google Client ID?</span>
+                  </summary>
+                  
+                  <div className="space-y-2 mt-3 p-3 bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs text-slate-650 dark:text-slate-300">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold">Google Client ID:</span>
+                      <a 
+                        href="https://console.cloud.google.com/apis/credentials" 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline font-bold"
+                      >
+                        Kde získat ID? &rarr;
+                      </a>
+                    </div>
+                    <input
+                      type="password"
+                      placeholder="Např. xxxxx-xxxxx.apps.googleusercontent.com"
+                      value={googleClientId}
+                      onChange={(e) => {
+                        setGoogleClientId(e.target.value.trim());
+                        localStorage.setItem("dokladovka-google-client-id", e.target.value.trim());
+                      }}
+                      className={`w-full p-2.5 text-xs rounded-xl outline-none border focus:ring-1 focus:ring-blue-500 ${darkMode ? 'bg-slate-900 border-slate-850 text-white' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
+                    />
+                    <p className="text-[9px] text-slate-400 dark:text-slate-500 leading-normal">
+                      Zadejte své Google Client ID vytvořené v Google Cloud Console. Bez nastaveného ID nemůže být Google login proveden. Client ID se bezpečně synchronizuje na váš Google Disk, jakmile se přihlásíte.
+                    </p>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* BOTTOM: App Description & Features */}
+        <div className="w-full max-w-4xl mx-auto py-4 space-y-6">
+          <div className="text-center space-y-2">
+            <span className="px-2.5 py-1 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 rounded-full text-[10px] font-bold border border-emerald-100 dark:border-emerald-900/40 uppercase tracking-widest inline-block">
+              100% Soukromý Cloudový Asistent
+            </span>
+            <h3 className="text-lg font-black tracking-tight text-slate-900 dark:text-white">Dokladovka Pipap &mdash; Hlavní Funkce</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto leading-relaxed">
+              Stylová a moderní krabička na doklady, kterou spravujete pouze vy. Žádné sdílení dat třetím stranám.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {/* Feature 1 - Green theme accent */}
+            <div className={`p-5 rounded-3xl border text-left space-y-3 ${darkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200/50'}`}>
+              <span className="inline-flex p-2 bg-emerald-50 dark:bg-emerald-900/10 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-100 dark:border-emerald-900/30 animate-pulse">
+                <ShoppingBag size={18} />
+              </span>
+              <h4 className="font-bold text-xs text-slate-800 dark:text-white uppercase tracking-wide">Výdaje &amp; Účtenky</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                Rychlé nahrávání, ořez a automatický položkový rozpad s AI extrakcí, rozdělení do kategorií s barevnými indikátory (modrá, zelená, oranžová).
+              </p>
+            </div>
+
+            {/* Feature 2 - Blue theme accent */}
+            <div className={`p-5 rounded-3xl border text-left space-y-3 ${darkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200/50'}`}>
+              <span className="inline-flex p-2 bg-blue-50 dark:bg-blue-900/10 text-blue-600 dark:text-blue-400 rounded-xl border border-blue-100 dark:border-blue-900/30">
+                <FolderOpen size={18} />
+              </span>
+              <h4 className="font-bold text-xs text-slate-800 dark:text-white uppercase tracking-wide">Šanony &amp; Smlouvy</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                Registr zdravotních zpráv, úřadů, rodinných dohod a pojistek. AI vygeneruje stručné shrnutí obsahu a pohlídá důležité lhůty s upozorněními.
+              </p>
+            </div>
+
+            {/* Feature 3 - Orange theme accent */}
+            <div className={`p-5 rounded-3xl border text-left space-y-3 ${darkMode ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200/50'}`}>
+              <span className="inline-flex p-2 bg-orange-50 dark:bg-orange-900/10 text-orange-600 dark:text-orange-400 rounded-xl border border-orange-100 dark:border-orange-900/30">
+                <CheckCircle2 size={18} />
+              </span>
+              <h4 className="font-bold text-xs text-slate-800 dark:text-white uppercase tracking-wide">Více Google Účtů</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                Oddělte osobní věci od podnikání. Přidejte si do Dokladovky vícero Google účtů a přepínejte se mezi nimi okamžitě bez nepřetržitého odhlašování.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Brand Footer */}
+        <div className="w-full border-t border-slate-100 dark:border-slate-900 max-w-4xl mx-auto py-5 text-center text-[10px] text-slate-400 dark:text-slate-500">
+          <p className="font-bold">DOKLADOVKA &bull; Všechna práva vyhrazena &copy; {new Date().getFullYear()} PIPAP.CZ</p>
+        </div>
+      </div>
+    );
+  }
+
   if (activeSection === 'selection') {
     return (
       <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex items-center justify-center p-4 md:p-8">
@@ -822,7 +1300,143 @@ export default function App() {
             </motion.button>
           </div>
 
-          {/* Bezpečné Nastavení Button */}
+          {/* Google Accounts Hub Card */}
+          <div className="bg-white border border-slate-200 rounded-3xl p-6 max-w-lg w-full mx-auto space-y-4 shadow-sm text-left">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${googleUser ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
+                {googleUser ? 'Aktivní synchronizace Google' : 'Není přihlášen žádný účet'}
+              </span>
+              {isCloudSyncing && (
+                <span className="text-[10px] text-indigo-500 font-semibold flex items-center gap-1">
+                  <Loader2 size={12} className="animate-spin" />
+                  Stahuji zálohu...
+                </span>
+              )}
+            </div>
+
+            {googleUser ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-3 bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                  <div className="flex items-center gap-2.5">
+                    {googleUser.picture ? (
+                      <img src={googleUser.picture} alt="" className="w-10 h-10 rounded-full border border-slate-200 shadow-sm" referrerPolicy="no-referrer" />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-indigo-600 text-white font-bold flex items-center justify-center text-sm">
+                        {googleUser.email.substring(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="truncate">
+                      <h4 className="text-sm font-bold text-slate-800 leading-normal">{googleUser.name}</h4>
+                      <p className="text-xs text-slate-400 truncate max-w-[200px] leading-normal">{googleUser.email}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      // Log out active account from the array
+                      const updated = googleAccounts.filter((_, idx) => idx !== activeAccountIndex);
+                      setGoogleAccounts(updated);
+                      localStorage.setItem("dokladovka-google-accounts", JSON.stringify(updated));
+                      const nextIndex = Math.max(0, updated.length - 1);
+                      setActiveAccountIndex(nextIndex);
+                      localStorage.setItem("dokladovka-active-account-index", String(nextIndex));
+                      if (updated.length === 0) {
+                        localStorage.removeItem("dokladovka-google-user");
+                        setActiveSection('welcome');
+                      }
+                    }}
+                    className="text-xs font-bold text-rose-500 hover:text-rose-600 hover:bg-rose-50 px-3 py-1.5 rounded-xl transition-all cursor-pointer whitespace-nowrap"
+                  >
+                    Odhlásit
+                  </button>
+                </div>
+
+                {/* Account list for switching if multiple accounts exist */}
+                {googleAccounts.length > 1 && (
+                  <div className="pt-2 border-t border-slate-100 space-y-2">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      Uložené účty (Klepnutím přepnete):
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {googleAccounts.map((acc, index) => {
+                        const isActive = index === activeAccountIndex;
+                        return (
+                          <button
+                            key={acc.user.email}
+                            onClick={() => {
+                              setActiveAccountIndex(index);
+                              localStorage.setItem("dokladovka-active-account-index", String(index));
+                            }}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all border cursor-pointer ${
+                              isActive 
+                              ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-bold' 
+                              : 'bg-slate-50 border-slate-100 hover:bg-slate-100 text-slate-600'
+                            }`}
+                          >
+                            {acc.user.picture && (
+                              <img src={acc.user.picture} alt="" className="w-4 h-4 rounded-full" referrerPolicy="no-referrer" />
+                            )}
+                            <span className="truncate max-w-[120px]">{acc.user.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Add dynamic accounts trigger */}
+                <div className="pt-2 flex justify-between items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (!googleClientId.trim()) {
+                        alert("Chybí konfigurace Google Client ID. Pro přidání dalšího účtu jej prosím nejprve doplňte v nastavení.");
+                        return;
+                      }
+                      const redirectUri = window.location.origin;
+                      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
+                        client_id: googleClientId.trim(),
+                        redirect_uri: redirectUri,
+                        response_type: "token",
+                        scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
+                        state: "google_login",
+                        prompt: "select_account"
+                      }).toString();
+                      window.location.href = authUrl;
+                    }}
+                    className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 hover:underline cursor-pointer"
+                  >
+                    + Přihlásit další Google účet
+                  </button>
+                  <span className="text-[10px] text-slate-400 font-semibold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    Záloha zašifrována a uložena
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4 py-2 text-center">
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Pokud se přihlásíte se svým Google účtem, vaše účtenky a dokumenty se budou bezpečně ukládat do vašeho soukromého cloudu. Budete je mít po ruce z mobilu i z jakéhokoliv počítače!
+                </p>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setActiveSection('welcome')}
+                    className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer"
+                  >
+                    Přihlásit se k Google
+                  </button>
+                  <button
+                    onClick={() => setActiveSection('settings')}
+                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                  >
+                    Nadefinovat Client ID
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Secure Settings Button & Disclaimer */}
           <div className="flex flex-col items-center gap-4">
             <motion.button
               whileHover={{ scale: 1.02, y: -2 }}
@@ -831,15 +1445,12 @@ export default function App() {
               className="inline-flex items-center gap-2.5 px-6 py-3 border border-slate-200 hover:border-indigo-400 bg-white hover:bg-slate-50 text-slate-700 font-bold text-sm shadow-sm hover:shadow-md rounded-2xl transition-all cursor-pointer"
             >
               <Settings size={16} className="text-indigo-600" />
-              <span>Nastavení Google integrace & API klíče</span>
-              {googleUser && (
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-1" title="Přihlášen k Google" />
-              )}
+              <span>Možnosti & Pokročilé nastavení API</span>
             </motion.button>
           </div>
 
           <div className="text-xs text-slate-400 font-medium pt-4">
-            Dokladovka Pipap.cz &copy; {new Date().getFullYear()} &bull; Všechna data jsou bezpečně uložena na vašem zařízení.
+            Dokladovka by Pipap.cz &bull; Všechna práva vyhrazena. &copy; {new Date().getFullYear()} &bull; Data na Google Disku máte pod plnou kontrolou.
           </div>
         </div>
       </div>
@@ -849,15 +1460,26 @@ export default function App() {
   if (activeSection === 'settings') {
     return (
       <GoogleSettings 
-        onBack={() => setActiveSection('selection')} 
+        onBack={() => {
+          // If no accounts exist, go back to welcome section, otherwise go to selection hub
+          if (googleAccounts.length === 0) {
+            setActiveSection('welcome');
+          } else {
+            setActiveSection('selection');
+          }
+        }} 
         apiKey={userApiKey} 
         setApiKey={setUserApiKey}
         clientId={googleClientId}
         setClientId={setGoogleClientId}
         googleUser={googleUser}
-        setGoogleUser={setGoogleUser}
+        setGoogleUser={() => {}} // Controlled via accounts array
         accessToken={googleAccessToken}
-        setAccessToken={setGoogleAccessToken}
+        setAccessToken={() => {}} // Controlled via accounts array
+        googleAccounts={googleAccounts}
+        setGoogleAccounts={setGoogleAccounts}
+        activeAccountIndex={activeAccountIndex}
+        setActiveAccountIndex={setActiveAccountIndex}
       />
     );
   }
@@ -872,6 +1494,8 @@ export default function App() {
             userApiKey={userApiKey}
             googleAccessToken={googleAccessToken}
             googleUser={googleUser}
+            documents={documents}
+            setDocuments={setDocuments}
           />
           
           {/* Shared Full Image Preview Modal */}

@@ -174,3 +174,95 @@ export async function createGoogleDocFromDocument(
     url: `https://docs.google.com/document/d/${documentId}/edit`
   };
 }
+
+/**
+ * Searches for 'dokladovka_sync_data.json' in Google Drive.
+ * Returns the file ID if found, otherwise null.
+ */
+export async function findSyncFile(accessToken: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      "https://www.googleapis.com/drive/v3/files?q=name='dokladovka_sync_data.json' and trashed=false&fields=files(id)",
+      {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.files && data.files.length > 0) {
+      return data.files[0].id;
+    }
+  } catch (error) {
+    console.error("Error finding sync file on Google Drive:", error);
+  }
+  return null;
+}
+
+/**
+ * Downloads receipt and document data from 'dokladovka_sync_data.json' on Google Drive.
+ */
+export async function downloadUserDataFromGoogleDrive(
+  accessToken: string,
+  fileId: string
+): Promise<{ receipts: any[]; documents: any[] } | null> {
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    if (!res.ok) throw new Error("Nelze načíst záložní data");
+    return await res.json();
+  } catch (error) {
+    console.error("Error downloading sync file from Google Drive:", error);
+    return null;
+  }
+}
+
+/**
+ * Saves/updates user data to 'dokladovka_sync_data.json' on Google Drive.
+ */
+export async function saveUserDataToGoogleDrive(
+  accessToken: string,
+  data: { receipts: any[]; documents: any[] }
+): Promise<string> {
+  // Try to find file first
+  let fileId = await findSyncFile(accessToken);
+  
+  if (!fileId) {
+    // Create new file metadata
+    const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        name: "dokladovka_sync_data.json",
+        mimeType: "application/json"
+      })
+    });
+    if (!createRes.ok) {
+      const err = await createRes.text();
+      throw new Error(`Failed to create sync file metadata: ${err}`);
+    }
+    const file = await createRes.json();
+    fileId = file.id;
+  }
+
+  // Upload file content
+  const uploadRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(data)
+  });
+
+  if (!uploadRes.ok) {
+    const err = await uploadRes.text();
+    throw new Error(`Failed to upload sync file content: ${err}`);
+  }
+
+  return fileId!;
+}
+
