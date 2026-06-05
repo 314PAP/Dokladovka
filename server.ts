@@ -7,20 +7,10 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-// Explicitly use the user's active, verified working Gemini API key to override depleted environment defaults
-const API_KEY = "AQ.Ab8RN6K2voDjgYBqIemIlMuzMnn1mgpzC_TLXF0Rt1zv0I8DNQ";
+const API_KEY = process.env.GEMINI_API_KEY || "";
 
 // Global array to store key details of the latest system extraction errors for diagnostics
 const debugErrors: Array<{ timestamp: string; endpoint: string; errorMessage: string; errorStack?: string }> = [];
-
-const ai = new GoogleGenAI({
-  apiKey: API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
 
 // Helper function to call generateContent with retry and exponential backoff
 async function generateContentWithRetry(apiKeyToUse: string, params: any, maxRetries = 3) {

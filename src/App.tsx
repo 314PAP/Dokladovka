@@ -116,6 +116,8 @@ const DOCUMENT_CATEGORIES = [
   { id: 'OtherDoc', name: 'Ostatní', icon: FolderOpen, color: 'bg-amber-500' },
 ];
 
+const BUILT_IN_GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim();
+
 const getGoogleRedirectUri = () => window.location.origin + window.location.pathname;
 
 const createOauthState = () => {
@@ -242,6 +244,7 @@ export default function App() {
   // Google / Custom credentials states
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("dokladovka-user-api-key") || "");
   const [googleClientId, setGoogleClientId] = useState(() => localStorage.getItem("dokladovka-google-client-id") || "");
+  const activeGoogleClientId = googleClientId.trim() || BUILT_IN_GOOGLE_CLIENT_ID;
   
   // Multiple Google accounts state
   const [googleAccounts, setGoogleAccounts] = useState<any[]>(() => {
@@ -337,7 +340,7 @@ export default function App() {
             setUserApiKey(extendedData.userApiKey);
             localStorage.setItem("dokladovka-user-api-key", extendedData.userApiKey);
           }
-          if (extendedData.googleClientId && !localStorage.getItem("dokladovka-google-client-id")) {
+          if (extendedData.googleClientId && !BUILT_IN_GOOGLE_CLIENT_ID && !localStorage.getItem("dokladovka-google-client-id")) {
             setGoogleClientId(extendedData.googleClientId);
             localStorage.setItem("dokladovka-google-client-id", extendedData.googleClientId);
           }
@@ -1127,11 +1130,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!googleClientId.trim()) {
-                    // Expand the details element and focus on the input
+                  if (!activeGoogleClientId) {
                     if (clientIdDetailsRef.current) {
                       clientIdDetailsRef.current.open = true;
-                      // Focus on the input field after the details element expands
                       setTimeout(() => {
                         const input = clientIdDetailsRef.current?.querySelector('input');
                         if (input) {
@@ -1141,7 +1142,7 @@ export default function App() {
                     }
                     return;
                   }
-                  startGoogleLogin(googleClientId);
+                  startGoogleLogin(activeGoogleClientId);
                 }}
                 className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 cursor-pointer"
               >
@@ -1193,7 +1194,7 @@ export default function App() {
                 <details ref={clientIdDetailsRef} className="group">
                   <summary className="text-xs text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 font-semibold list-none flex items-center gap-1 cursor-pointer select-none">
                     <span className="transition-transform group-open:rotate-90">&rtrif;</span>
-                    <span>⚙️ Nastavit Google Client ID (požadováno pro přihlášení)</span>
+                    <span>Pokročilé: vlastní Google Client ID</span>
                   </summary>
                   
                   <div className="space-y-2 mt-3 p-3 bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs text-slate-650 dark:text-slate-300">
@@ -1219,7 +1220,7 @@ export default function App() {
                       className={`w-full p-2.5 text-xs rounded-xl outline-none border focus:ring-1 focus:ring-blue-500 ${darkMode ? 'bg-slate-900 border-slate-850 text-white' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
                     />
                     <p className="text-[9px] text-slate-400 dark:text-slate-500 leading-normal">
-                      Zadejte své Google Client ID vytvořené v Google Cloud Console. Bez nastaveného ID nemůže být Google login proveden. Client ID se bezpečně synchronizuje na váš Google Disk, jakmile se přihlásíte.
+                      Volitelné. Pokud ho necháte prázdné, přihlášení použije veřejný OAuth identifikátor Dokladovky nastavený při deployi. Vlastní ID se bezpečně synchronizuje na váš Google Disk, jakmile se přihlásíte.
                     </p>
                   </div>
                 </details>
@@ -1447,11 +1448,11 @@ export default function App() {
                 <div className="pt-2 flex justify-between items-center gap-2">
                   <button
                     onClick={() => {
-                      if (!googleClientId.trim()) {
-                        alert("Chybí konfigurace Google Client ID. Pro přidání dalšího účtu jej prosím nejprve doplňte v nastavení.");
+                      if (!activeGoogleClientId) {
+                        alert("Google přihlášení zatím není nakonfigurované. Doplňte prosím vlastní Client ID v nastavení.");
                         return;
                       }
-                      startGoogleLogin(googleClientId);
+                      startGoogleLogin(activeGoogleClientId);
                     }}
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 hover:underline cursor-pointer"
                   >
@@ -1522,6 +1523,7 @@ export default function App() {
         setApiKey={setUserApiKey}
         clientId={googleClientId}
         setClientId={setGoogleClientId}
+        builtInClientId={BUILT_IN_GOOGLE_CLIENT_ID}
         googleUser={googleUser}
         setGoogleUser={() => {}} // Controlled via accounts array
         accessToken={googleAccessToken}

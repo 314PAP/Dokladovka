@@ -35,8 +35,9 @@ This project deploys to GitHub Pages using GitHub Actions and publishes the buil
 ### Environment Setup
 
 1. No runtime GitHub secret is required for the public SPA.
-2. Each user supplies their own `Google OAuth Client ID` and `Gemini API key` in the app settings after they open the site.
-3. If you run the server locally, you can still use `.env.local` to store `GEMINI_API_KEY` for the backend server.
+2. The deployed app should provide a public Google OAuth Client ID through `VITE_GOOGLE_CLIENT_ID` so users can sign in with their own Google accounts immediately.
+3. Users can optionally supply their own `Google OAuth Client ID` and `Gemini API key` in the app settings.
+4. If you run the server locally, you can still use `.env.local` to store `GEMINI_API_KEY` for the backend server.
 
 ### GitHub Pages Settings
 
@@ -54,7 +55,8 @@ This project deploys to GitHub Pages using GitHub Actions and publishes the buil
 3. Add authorized redirect URIs:
    - `http://localhost:5173/`
    - `https://314pap.github.io/Dokladovka/`
-4. Open the app in the browser and paste your personal Client ID into the app settings.
+4. Add the Client ID as a GitHub repository variable named `VITE_GOOGLE_CLIENT_ID` for GitHub Pages builds.
+5. Users can still paste their own Client ID in the app settings if they want to override the app default.
 
 ### Build & Deploy Process
 

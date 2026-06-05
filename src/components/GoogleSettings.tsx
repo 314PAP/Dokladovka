@@ -20,6 +20,7 @@ interface GoogleSettingsProps {
   setApiKey: (val: string) => void;
   clientId: string;
   setClientId: (val: string) => void;
+  builtInClientId?: string;
   googleUser: any;
   setGoogleUser: (user: any) => void;
   accessToken: string | null;
@@ -36,6 +37,7 @@ export default function GoogleSettings({
   setApiKey,
   clientId,
   setClientId,
+  builtInClientId = "",
   googleUser,
   setGoogleUser,
   accessToken,
@@ -52,6 +54,7 @@ export default function GoogleSettings({
   const [showClientIdTooltip, setShowClientIdTooltip] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const activeClientId = clientId.trim() || builtInClientId.trim();
 
   // Parse Google Auth hash/query redirect with error handling
   useEffect(() => {
@@ -127,9 +130,9 @@ export default function GoogleSettings({
   };
 
   const handleGoogleLogin = () => {
-    const trimmedClientId = clientId.trim();
+    const trimmedClientId = activeClientId;
     if (!trimmedClientId) {
-      alert("Pro přihlášení prosím nejprve vyplňte své Google Client ID.");
+      alert("Google přihlášení zatím není nakonfigurované. Doplňte prosím vlastní Client ID níže.");
       return;
     }
 
@@ -178,7 +181,7 @@ export default function GoogleSettings({
   };
 
   const handleClearCustomSettings = () => {
-    if (window.confirm("Opravdu chcete vymazat vaše vlastní klíče a vrátit se k vestavěnému nastavení?")) {
+    if (window.confirm("Opravdu chcete vymazat vaše vlastní klíče?")) {
       setApiKey("");
       setClientId("");
       localStorage.removeItem("dokladovka-user-api-key");
@@ -346,7 +349,7 @@ export default function GoogleSettings({
                 </div>
               </div>
 
-              {clientId ? (
+              {activeClientId ? (
                 <button 
                   onClick={handleGoogleLogin}
                   className="w-full sm:w-auto flex items-center justify-center gap-3 px-5 py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold text-sm shadow-md transition-all cursor-pointer"
@@ -356,7 +359,7 @@ export default function GoogleSettings({
                 </button>
               ) : (
                 <p className="text-xs text-slate-400 italic text-left">
-                  Pro aktivaci Google přihlášení nejprve vyplňte vaše Google Client ID v políčku níže.
+                  Google přihlášení zatím nemá nastavený veřejný OAuth identifikátor aplikace. Doplňte vlastní ID níže, nebo nastavte ID aplikace v deployi.
                 </p>
               )}
             </div>
@@ -371,7 +374,7 @@ export default function GoogleSettings({
               Vlastní API Klíče a Identifikace (Zvýšené limity & Soukromí)
             </h2>
             <p className="text-xs text-slate-500 leading-relaxed font-medium">
-              Zde můžete nakonfigurovat své vlastní přístupové údaje. Tím získáte <strong>100% kontrolu nad svým soukromím</strong> (veškeré požadavky půjdou přímo z vašeho prohlížeče na Google servery) a <strong>zcela se vyhnete denním limitům</strong>. Pokud políčka necháte prázdná, aplikace bez problému funguje s naším sdíleným vestavěným klíčem.
+              Zde můžete nakonfigurovat své vlastní přístupové údaje. Google OAuth Client ID je veřejný identifikátor aplikace pro přihlášení přes Google; není to osobní účet ani API klíč. Gemini API klíč slouží pro AI analýzu dokladů a bez vlastního klíče nebo bezpečně nastaveného serveru může aplikace použít jen náhradní zpracování bez AI.
             </p>
           </div>
 
@@ -439,7 +442,7 @@ export default function GoogleSettings({
                 </button>
               </div>
               <p className="text-[11px] text-slate-400 font-medium">
-                Ponecháte-li prázdné, analýza probíhá přes zabudované super-rychlé cloudové propojení.
+                Ponecháte-li prázdné, AI analýza poběží jen tehdy, pokud je bezpečně nastavený serverový klíč. Na GitHub Pages bez serveru aplikace použije náhradní zpracování.
               </p>
             </div>
 
@@ -447,7 +450,7 @@ export default function GoogleSettings({
             <div className="space-y-2 relative">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <span className="block text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-1.5">
-                  2. Vlastní Google OAuth Client ID
+                  2. Volitelné vlastní Google OAuth Client ID
                   <div className="relative inline-block group">
                     <button
                       type="button"
@@ -496,7 +499,7 @@ export default function GoogleSettings({
                 className="w-full px-3.5 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none focus:bg-white text-slate-800 font-mono"
               />
               <p className="text-[11px] text-slate-400 font-medium">
-                Klíč je bezpečně uložen pouze lokálně ve vašem prohlížeči a je nezbytný pro fungování cloudových přihlášení.
+                Pokud políčko necháte prázdné, aplikace použije veřejný OAuth identifikátor Dokladovky nastavený při deployi. Vlastní ID je uložené pouze lokálně ve vašem prohlížeči.
               </p>
             </div>
 
