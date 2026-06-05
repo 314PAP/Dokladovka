@@ -116,6 +116,7 @@ const DOCUMENT_CATEGORIES = [
   { id: 'OtherDoc', name: 'Ostatní', icon: FolderOpen, color: 'bg-amber-500' },
 ];
 
+const BUILT_IN_GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID || "").trim();
 
 const getGoogleRedirectUri = () => window.location.origin + window.location.pathname;
 
@@ -238,10 +239,12 @@ export default function App() {
 
   const [welcomeEmail, setWelcomeEmail] = useState("telefoncapi@gmail.com");
   const [welcomeName, setWelcomeName] = useState("");
+  const clientIdDetailsRef = useRef<HTMLDetailsElement>(null);
   
   // Google / Custom credentials states
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("dokladovka-user-api-key") || "");
   const [googleClientId, setGoogleClientId] = useState(() => localStorage.getItem("dokladovka-google-client-id") || "");
+  const activeGoogleClientId = googleClientId.trim() || BUILT_IN_GOOGLE_CLIENT_ID;
   
   // Multiple Google accounts state
   const [googleAccounts, setGoogleAccounts] = useState<any[]>(() => {
@@ -337,7 +340,7 @@ export default function App() {
             setUserApiKey(extendedData.userApiKey);
             localStorage.setItem("dokladovka-user-api-key", extendedData.userApiKey);
           }
-          if (extendedData.googleClientId && !localStorage.getItem("dokladovka-google-client-id")) {
+          if (extendedData.googleClientId && !BUILT_IN_GOOGLE_CLIENT_ID && !localStorage.getItem("dokladovka-google-client-id")) {
             setGoogleClientId(extendedData.googleClientId);
             localStorage.setItem("dokladovka-google-client-id", extendedData.googleClientId);
           }
@@ -1127,11 +1130,19 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  if (!googleClientId.trim()) {
-                    setActiveSection('settings');
+                  if (!activeGoogleClientId) {
+                    if (clientIdDetailsRef.current) {
+                      clientIdDetailsRef.current.open = true;
+                      setTimeout(() => {
+                        const input = clientIdDetailsRef.current?.querySelector('input');
+                        if (input) {
+                          input.focus();
+                        }
+                      }, 100);
+                    }
                     return;
                   }
-                  startGoogleLogin(googleClientId.trim());
+                  startGoogleLogin(activeGoogleClientId);
                 }}
                 className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 cursor-pointer"
               >
@@ -1178,7 +1189,42 @@ export default function App() {
                 </div>
               )}
 
-
+              {/* Collapsible Client ID section on demand */}
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-800/60 text-left">
+                <details ref={clientIdDetailsRef} className="group">
+                  <summary className="text-xs text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 font-semibold list-none flex items-center gap-1 cursor-pointer select-none">
+                    <span className="transition-transform group-open:rotate-90">&rtrif;</span>
+                    <span>Pokročilé: vlastní Google Client ID</span>
+                  </summary>
+                  
+                  <div className="space-y-2 mt-3 p-3 bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs text-slate-650 dark:text-slate-300">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold">Google Client ID:</span>
+                      <a 
+                        href="https://console.cloud.google.com/apis/credentials" 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline font-bold"
+                      >
+                        Kde získat ID? &rarr;
+                      </a>
+                    </div>
+                    <input
+                      type="password"
+                      placeholder="Např. xxxxx-xxxxx.apps.googleusercontent.com"
+                      value={googleClientId}
+                      onChange={(e) => {
+                        setGoogleClientId(e.target.value.trim());
+                        localStorage.setItem("dokladovka-google-client-id", e.target.value.trim());
+                      }}
+                      className={`w-full p-2.5 text-xs rounded-xl outline-none border focus:ring-1 focus:ring-blue-500 ${darkMode ? 'bg-slate-900 border-slate-850 text-white' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
+                    />
+                    <p className="text-[9px] text-slate-400 dark:text-slate-500 leading-normal">
+                      Volitelné. Pokud ho necháte prázdné, přihlášení použije veřejný OAuth identifikátor Dokladovky nastavený při deployi. Vlastní ID se bezpečně synchronizuje na váš Google Disk, jakmile se přihlásíte.
+                    </p>
+                  </div>
+                </details>
+              </div>
             </div>
           </div>
         </div>
@@ -1402,11 +1448,11 @@ export default function App() {
                 <div className="pt-2 flex justify-between items-center gap-2">
                   <button
                     onClick={() => {
-                      if (!googleClientId.trim()) {
+                      if (!activeGoogleClientId) {
                         alert("Google přihlášení zatím není nakonfigurované. Doplňte prosím vlastní Client ID v nastavení.");
                         return;
                       }
-                      startGoogleLogin(googleClientId.trim());
+                      startGoogleLogin(activeGoogleClientId);
                     }}
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 hover:underline cursor-pointer"
                   >
@@ -1434,7 +1480,7 @@ export default function App() {
                     onClick={() => setActiveSection('settings')}
                     className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
                   >
-                     Nadefinovat Google Client ID
+                    Nadefinovat Client ID
                   </button>
                 </div>
               </div>
@@ -1477,6 +1523,7 @@ export default function App() {
         setApiKey={setUserApiKey}
         clientId={googleClientId}
         setClientId={setGoogleClientId}
+        builtInClientId={BUILT_IN_GOOGLE_CLIENT_ID}
         googleUser={googleUser}
         setGoogleUser={() => {}} // Controlled via accounts array
         accessToken={googleAccessToken}
