@@ -127,32 +127,24 @@ export default function GoogleSettings({
   };
 
   const handleGoogleLogin = () => {
-    const trimmedClientId = clientId.trim();
-    if (!trimmedClientId) {
+    if (!clientId.trim()) {
       alert("Pro přihlášení prosím nejprve vyplňte své Google Client ID.");
       return;
     }
-
-    // Generate secure random state for CSRF protection
-    const oauthState = typeof crypto?.randomUUID === "function"
-      ? crypto.randomUUID()
-      : Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
-
-    localStorage.setItem("dokladovka-google-client-id", trimmedClientId);
+    
+    // Set pending flag
     localStorage.setItem("google-auth-pending", "true");
-    localStorage.setItem("google-oauth-state", oauthState);
-
+    
     const redirectUri = window.location.origin;
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
-      client_id: trimmedClientId,
+      client_id: clientId.trim(),
       redirect_uri: redirectUri,
       response_type: "token",
       scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
-      state: oauthState,
-      prompt: "select_account consent",
-      include_granted_scopes: "true"
+      state: "google_login",
+      prompt: "select_account"
     }).toString();
-
+    
     window.location.href = authUrl;
   };
 
