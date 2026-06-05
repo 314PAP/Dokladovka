@@ -206,6 +206,7 @@ export default function App() {
 
   const [welcomeEmail, setWelcomeEmail] = useState("telefoncapi@gmail.com");
   const [welcomeName, setWelcomeName] = useState("");
+  const clientIdDetailsRef = useRef<HTMLDetailsElement>(null);
   
   // Google / Custom credentials states
   const [userApiKey, setUserApiKey] = useState(() => localStorage.getItem("dokladovka-user-api-key") || "");
@@ -1096,7 +1097,17 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   if (!googleClientId.trim()) {
-                    alert("Před přihlášením prosím zadejte Google Client ID níže v rozbalovacím políčku.");
+                    // Expand the details element and focus on the input
+                    if (clientIdDetailsRef.current) {
+                      clientIdDetailsRef.current.open = true;
+                      // Focus on the input field after the details element expands
+                      setTimeout(() => {
+                        const input = clientIdDetailsRef.current?.querySelector('input');
+                        if (input) {
+                          input.focus();
+                        }
+                      }, 100);
+                    }
                     return;
                   }
                   const redirectUri = window.location.origin + window.location.pathname;
@@ -1157,10 +1168,10 @@ export default function App() {
 
               {/* Collapsible Client ID section on demand */}
               <div className="pt-3 border-t border-slate-200 dark:border-slate-800/60 text-left">
-                <details className="group">
+                <details ref={clientIdDetailsRef} className="group">
                   <summary className="text-xs text-slate-400 dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 font-semibold list-none flex items-center gap-1 cursor-pointer select-none">
                     <span className="transition-transform group-open:rotate-90">&rtrif;</span>
-                    <span>Potřebujete nastavit / změnit Google Client ID?</span>
+                    <span>⚙️ Nastavit Google Client ID (požadováno pro přihlášení)</span>
                   </summary>
                   
                   <div className="space-y-2 mt-3 p-3 bg-white dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-slate-800 text-xs text-slate-650 dark:text-slate-300">
