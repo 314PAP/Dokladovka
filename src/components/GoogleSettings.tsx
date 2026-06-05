@@ -142,7 +142,7 @@ export default function GoogleSettings({
     localStorage.setItem("google-auth-pending", "true");
     localStorage.setItem("google-oauth-state", oauthState);
 
-    const redirectUri = window.location.origin;
+    const redirectUri = getRedirectUri();
     const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
       client_id: trimmedClientId,
       redirect_uri: redirectUri,

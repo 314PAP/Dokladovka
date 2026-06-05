@@ -28,28 +28,33 @@ View your app in AI Studio: https://ai.studio/apps/8e5f69bb-cda3-4fb4-b87d-7a8c4
 
 ## GitHub Pages Deployment
 
-This project is deployed automatically to GitHub Pages via GitHub Actions.
+This project deploys to GitHub Pages using GitHub Actions and publishes the built site to the `gh-pages` branch.
 
 **Deployment URL:** https://314pap.github.io/Dokladovka
 
 ### Environment Setup
 
-1. In GitHub repository settings → Secrets and variables → Actions, add:
-   - `VITE_GOOGLE_CLIENT_ID` — Your Google OAuth 2.0 Client ID
-   - `GEMINI_API_KEY` — Your Gemini API key
+1. No runtime GitHub secret is required for the public SPA.
+2. Each user supplies their own `Google OAuth Client ID` and `Gemini API key` in the app settings after they open the site.
+3. If you run the server locally, you can still use `.env.local` to store `GEMINI_API_KEY` for the backend server.
 
-2. Repository settings → Pages → Build and deployment: Source = Deploy from a branch, Branch = `gh-pages` / `root`
+### GitHub Pages Settings
+
+1. In GitHub repository settings → Pages, set Source to:
+   - Branch: `gh-pages`
+   - Folder: `/ (root)`
+2. Save the settings.
 
 ### Google OAuth Configuration
 
-1. Create OAuth 2.0 Client ID in Google Cloud Console (Web application type)
+1. Create OAuth 2.0 Client ID in Google Cloud Console (Web application type).
 2. Add authorized JavaScript origins:
    - `http://localhost:5173`
    - `https://314pap.github.io`
 3. Add authorized redirect URIs:
    - `http://localhost:5173/`
    - `https://314pap.github.io/Dokladovka/`
-4. Store Client ID in repository secrets as `VITE_GOOGLE_CLIENT_ID`
+4. Open the app in the browser and paste your personal Client ID into the app settings.
 
 ### Build & Deploy Process
 
