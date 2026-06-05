@@ -116,6 +116,37 @@ const DOCUMENT_CATEGORIES = [
   { id: 'OtherDoc', name: 'Ostatní', icon: FolderOpen, color: 'bg-amber-500' },
 ];
 
+const getGoogleRedirectUri = () => window.location.origin + window.location.pathname;
+
+const createOauthState = () => {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
+};
+
+const startGoogleLogin = (clientId: string) => {
+  const trimmedClientId = clientId.trim();
+  const oauthState = createOauthState();
+
+  localStorage.setItem("dokladovka-google-client-id", trimmedClientId);
+  localStorage.setItem("google-auth-pending", "true");
+  localStorage.setItem("google-oauth-state", oauthState);
+
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
+    client_id: trimmedClientId,
+    redirect_uri: getGoogleRedirectUri(),
+    response_type: "token",
+    scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
+    state: oauthState,
+    prompt: "select_account consent",
+    include_granted_scopes: "true"
+  }).toString();
+
+  window.location.href = authUrl;
+};
+
 /**
  * Utility to create a cropped image
  */
@@ -386,7 +417,7 @@ export default function App() {
       window.history.replaceState(
         {}, 
         document.title, 
-        window.location.pathname + window.location.search
+        window.location.pathname
       );
 
       setActiveSection('selection');
@@ -1110,16 +1141,7 @@ export default function App() {
                     }
                     return;
                   }
-                  const redirectUri = window.location.origin + window.location.pathname;
-                  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
-                    client_id: googleClientId.trim(),
-                    redirect_uri: redirectUri,
-                    response_type: "token",
-                    scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
-                    state: "google_login",
-                    prompt: "select_account"
-                  }).toString();
-                  window.location.href = authUrl;
+                  startGoogleLogin(googleClientId);
                 }}
                 className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-sm shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3 cursor-pointer"
               >
@@ -1429,16 +1451,7 @@ export default function App() {
                         alert("Chybí konfigurace Google Client ID. Pro přidání dalšího účtu jej prosím nejprve doplňte v nastavení.");
                         return;
                       }
-                      const redirectUri = window.location.origin;
-                      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
-                        client_id: googleClientId.trim(),
-                        redirect_uri: redirectUri,
-                        response_type: "token",
-                        scope: "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents openid email profile",
-                        state: "google_login",
-                        prompt: "select_account"
-                      }).toString();
-                      window.location.href = authUrl;
+                      startGoogleLogin(googleClientId);
                     }}
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 hover:underline cursor-pointer"
                   >
@@ -2589,4 +2602,3 @@ export default function App() {
     </div>
   );
 }
-

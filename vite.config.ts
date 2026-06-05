@@ -5,8 +5,10 @@ import {defineConfig, loadEnv} from 'vite';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const defaultBase = mode === 'production' ? '/Dokladovka/' : '/';
+
   return {
-    base: env.VITE_BASE_URL || '/',
+    base: env.VITE_BASE_URL || defaultBase,
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),

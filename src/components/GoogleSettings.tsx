@@ -92,7 +92,7 @@ export default function GoogleSettings({
       window.history.replaceState(
         {}, 
         document.title, 
-        window.location.pathname + window.location.search
+        window.location.pathname
       );
 
       setAccessToken(token);
@@ -134,8 +134,8 @@ export default function GoogleSettings({
     }
 
     // Generate secure random state for CSRF protection
-    const oauthState = typeof crypto?.randomUUID === "function"
-      ? crypto.randomUUID()
+    const oauthState = typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
       : Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join("");
 
     localStorage.setItem("dokladovka-google-client-id", trimmedClientId);
