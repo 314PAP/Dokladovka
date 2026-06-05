@@ -187,8 +187,10 @@ export default function GoogleSettings({
     }
   };
 
+  const getRedirectUri = () => window.location.origin + window.location.pathname;
+
   const copyRedirectUri = () => {
-    navigator.clipboard.writeText(window.location.origin);
+    navigator.clipboard.writeText(getRedirectUri());
     setIsCopied(true);
     setTimeout(() => setIsCopied(false), 2000);
   };
@@ -624,7 +626,7 @@ export default function GoogleSettings({
                           <li>
                             Do části <strong>Authorized JavaScript origins</strong> klikněte vpravo na <strong>+ Add URI</strong> a vložte přesně adresu naší aplikace:
                             <div className="flex items-center gap-2 mt-1 bg-white p-2 rounded-lg border border-slate-200 font-mono text-[10px] text-slate-700 overflow-x-auto font-bold">
-                              <span>{window.location.origin}</span>
+                              <span>{getRedirectUri()}</span>
                               <button 
                                 onClick={copyRedirectUri}
                                 className="ml-auto px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-md font-bold text-[9px] cursor-pointer whitespace-nowrap border border-indigo-200"
@@ -636,7 +638,7 @@ export default function GoogleSettings({
                           <li>
                             Do části <strong>Authorized redirect URIs</strong> klikněte na <strong>+ Add URI</strong> a vložte tam naprosto stejnou adresu:
                             <div className="bg-white p-2 mt-1 rounded-lg border border-slate-200 font-mono text-[10px] text-slate-700 overflow-x-auto font-bold">
-                              {window.location.origin}
+                              {getRedirectUri()}
                             </div>
                           </li>
                           <li>Klikněte dolů na tlačítko <strong>Create</strong> (Vytvořit).</li>

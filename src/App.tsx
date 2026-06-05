@@ -1099,7 +1099,7 @@ export default function App() {
                     alert("Před přihlášením prosím zadejte Google Client ID níže v rozbalovacím políčku.");
                     return;
                   }
-                  const redirectUri = window.location.origin;
+                  const redirectUri = window.location.origin + window.location.pathname;
                   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` + new URLSearchParams({
                     client_id: googleClientId.trim(),
                     redirect_uri: redirectUri,
