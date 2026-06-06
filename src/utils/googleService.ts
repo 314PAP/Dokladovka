@@ -11,6 +11,177 @@ interface GoogleDocItem {
   keyDetails: string[];
 }
 
+const DRIVE_ROOT_FOLDER_NAME = "Dokladovka";
+
+const ensureDriveFolder = async (accessToken: string, name: string, parentId?: string): Promise<string | null> => {
+  const parentClause = parentId ? ` and '${parentId}' in parents` : "";
+  const q = `name='${name.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false${parentClause}`;
+  const listUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`;
+
+  const listRes = await fetch(listUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+
+  if (listRes.ok) {
+    const data = await listRes.json();
+    const existing = data.files && data.files[0];
+    if (existing?.id) return existing.id;
+  }
+
+  const metadata: any = {
+    name,
+    mimeType: "application/vnd.google-apps.folder"
+  };
+  if (parentId) metadata.parents = [parentId];
+
+  const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(metadata)
+  });
+
+  if (!createRes.ok) {
+    const errText = await createRes.text();
+    throw new Error(`Nepodařilo se vytvořit složku ${name}: ${errText}`);
+  }
+
+  const created = await createRes.json();
+  return created.id ?? null;
+};
+
+export const ensureDokladovkaStructure = async (accessToken: string): Promise<string | null> => {
+  const rootId = await ensureDriveFolder(accessToken, DRIVE_ROOT_FOLDER_NAME);
+  if (!rootId) return null;
+
+  const categoryFolders = ["dokumenty", "uctenky"];
+  for (const folder of categoryFolders) {
+    await ensureDriveFolder(accessToken, folder, rootId);
+  }
+
+  return rootId;
+};
+
+export const getDocumentCategoryFolderId = async (
+  accessToken: string,
+  category: string,
+  rootId: string
+): Promise<string | null> => {
+  const normalized = category?.trim()?.toLowerCase() || "ostatni";
+  const folder = `dokumenty/${normalized}`;
+  const name = folder.split("/").pop() || "ostatni";
+  const parentPath = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : undefined;
+  const parentId = parentPath
+    ? await ensureDriveFolder(
+        accessToken,
+        parentPath.split("/").pop() || parentPath,
+        rootId
+      )
+    : rootId;
+
+  return ensureDriveFolder(accessToken, name, parentId || undefined);
+};
+
+const findExistingByName = async (
+  accessToken: string,
+  name: string,
+  parentId: string
+): Promise<string | null> => {
+  const q = `name='${name.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    }
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.files && data.files[0] ? data.files[0].id : null;
+};
+
+export const uploadDocumentImageToDrive = async (
+  accessToken: string,
+  base64Image: string,
+  title: string,
+  issueDate: string,
+  category: string
+): Promise<{ id?: string; url?: string }> => {
+  const rootId = await ensureDokladovkaStructure(accessToken);
+  if (!rootId) throw new Error("Dokladovka root folder missing");
+
+  const categoryId = await getDocumentCategoryFolderId(accessToken, category, rootId);
+  if (!categoryId) throw new Error("Category folder missing");
+
+  const safeTitle = (title || "dokument").replace(/[^a-zA-Z0-9áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\-_. ]+/g, "").trim() || "dokument";
+  const datePart = issueDate ? issueDate.replace(/-/g, "") : new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const fileName = `${datePart}-${safeTitle}.jpg`;
+
+  const existingId = await findExistingByName(accessToken, fileName, categoryId);
+  if (existingId) {
+    return {
+      id: existingId,
+      url: `https://drive.google.com/file/d/${existingId}/view`
+    };
+  }
+
+  const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, "");
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: "image/jpeg" });
+
+  const metadata = {
+    name: fileName,
+    mimeType: "image/jpeg",
+    parents: [categoryId]
+  };
+
+  const boundary = "-------314159265358979323846";
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const close_delim = `\r\n--${boundary}--`;
+
+  const metadataStr = JSON.stringify(metadata);
+  const header =
+    `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${metadataStr}${delimiter}Content-Type: image/jpeg\r\n\r\n`;
+  const footer = `\r\n${close_delim}`;
+
+  const encoder = new TextEncoder();
+  const headerBytes = encoder.encode(header);
+  const footerBytes = encoder.encode(footer);
+
+  const body = new Uint8Array(headerBytes.length + blob.size + footerBytes.length);
+  body.set(headerBytes, 0);
+  body.set(new Uint8Array(await blob.arrayBuffer()), headerBytes.length);
+  body.set(footerBytes, headerBytes.length + blob.size);
+
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Upload na Google Disk selhal: ${errText}`);
+  }
+
+  const data = await response.json();
+  return {
+    id: data.id,
+    url: `https://drive.google.com/file/d/${data.id}/view`
+  };
+};
+
 /**
  * Uploads a PDF blob directly to Google Drive via the multipart/related endpoint.
  */

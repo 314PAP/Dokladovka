@@ -24,7 +24,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { exportDocumentsToPDF } from '../utils/pdfExport';
 import { resizeAndCompressImage } from '../utils/imageCompressor';
 import { getSmartFallbackDocument } from '../utils/smartFallback';
-import { uploadPdfToGoogleDrive, createGoogleDocFromDocument } from '../utils/googleService';
+import { uploadPdfToGoogleDrive, createGoogleDocFromDocument, uploadDocumentImageToDrive, getDocumentCategoryFolderId } from '../utils/googleService';
 
 interface DocumentItem {
   id: string;
@@ -457,7 +457,6 @@ export default function DocumentSection({
     if (userApiKey) {
       headers["x-gemini-key"] = userApiKey;
     }
-    // Call backend processing endpoint
     const response = await fetch("/api/extract-document", {
       method: "POST",
       headers,
@@ -492,7 +491,23 @@ export default function DocumentSection({
       fileName,
       fileSize
     };
+
     setDocuments(prev => [newDoc, ...prev]);
+
+    if (googleAccessToken) {
+      try {
+        const upload = await uploadDocumentImageToDrive(
+          googleAccessToken,
+          base64Image,
+          newDoc.title,
+          newDoc.issueDate,
+          newDoc.category
+        );
+        setDocuments(prev => prev.map(d => d.id === newDoc.id ? { ...d, driveImageId: upload.id, driveImageUrl: upload.url } : d));
+      } catch (uploadError) {
+        console.warn("Upload document image to Drive failed:", uploadError);
+      }
+    }
   };
 
   const sendToDocumentScanner = async (base64Image?: string) => {

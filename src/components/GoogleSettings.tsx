@@ -20,7 +20,6 @@ interface GoogleSettingsProps {
   setApiKey: (val: string) => void;
   clientId: string;
   setClientId: (val: string) => void;
-  builtInClientId?: string;
   googleUser: any;
   setGoogleUser: (user: any) => void;
   accessToken: string | null;
@@ -37,7 +36,6 @@ export default function GoogleSettings({
   setApiKey,
   clientId,
   setClientId,
-  builtInClientId = "",
   googleUser,
   setGoogleUser,
   accessToken,
@@ -54,7 +52,8 @@ export default function GoogleSettings({
   const [showClientIdTooltip, setShowClientIdTooltip] = useState(false);
   const [isCopied, setIsCopied] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
-  const activeClientId = clientId.trim() || builtInClientId.trim();
+  const [isSaving, setIsSaving] = useState(false);
+  const activeClientId = clientId.trim();
 
   // Parse Google Auth hash/query redirect with error handling
   useEffect(() => {
@@ -174,10 +173,15 @@ export default function GoogleSettings({
     triggerNotification("Účet byl odhlášen.");
   };
 
-  const handleSaveApiKeys = () => {
-    localStorage.setItem("dokladovka-user-api-key", apiKey.trim());
-    localStorage.setItem("dokladovka-google-client-id", clientId.trim());
+  const handleSaveApiKeys = async () => {
+    const next = apiKey.trim();
+    const cid = clientId.trim();
+    setIsSaving(true);
+    setSaveStatus(null);
+    localStorage.setItem("dokladovka-user-api-key", next);
+    localStorage.setItem("dokladovka-google-client-id", cid);
     triggerNotification("Nastavení uloženo do prohlížeče.");
+    setIsSaving(false);
   };
 
   const handleClearCustomSettings = () => {
@@ -350,7 +354,7 @@ export default function GoogleSettings({
               </div>
 
               {activeClientId ? (
-                <button 
+                <button
                   onClick={handleGoogleLogin}
                   className="w-full sm:w-auto flex items-center justify-center gap-3 px-5 py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold text-sm shadow-md transition-all cursor-pointer"
                 >
@@ -358,9 +362,27 @@ export default function GoogleSettings({
                   Přihlásit se přes Google
                 </button>
               ) : (
-                <p className="text-xs text-slate-400 italic text-left">
-                  Google přihlášení zatím nemá nastavený veřejný OAuth identifikátor aplikace. Doplňte vlastní ID níže, nebo nastavte ID aplikace v deployi.
-                </p>
+                <div className="space-y-3 text-left">
+                  <p className="text-xs text-slate-400 italic">
+                    Přihlášení přes Google zatím není nakonfigurované. V Nastavení níže zadejte svůj Google OAuth Client ID a pak se přihlaste bezpečně.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowInstructions(true)}
+                      className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-bold hover:bg-slate-100"
+                    >
+                      Zobrazit návod na Client ID
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onBack}
+                      className="px-3 py-2 rounded-xl border border-transparent text-slate-500 text-xs font-semibold hover:text-slate-700"
+                    >
+                      &larr; Zpět
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           )}
@@ -506,14 +528,33 @@ export default function GoogleSettings({
             {/* Actions for local configuration */}
             <div className="flex flex-wrap gap-3 pt-2 border-t border-slate-100">
               <button
-                onClick={handleSaveApiKeys}
-                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-sm shadow-sm transition-all cursor-pointer"
+                type="button"
+                onClick={async () => {
+                  setIsSaving(true);
+                  setSaveStatus(null);
+                  await new Promise(resolve => setTimeout(resolve, 200));
+                  localStorage.setItem("dokladovka-user-api-key", apiKey.trim());
+                  localStorage.setItem("dokladovka-google-client-id", clientId.trim());
+                  setSaveStatus("Nastavení uloženo do prohlížeče.");
+                  setIsSaving(false);
+                  setTimeout(() => setSaveStatus(null), 2500);
+                }}
+                disabled={isSaving}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-xl font-bold text-sm shadow-sm transition-all cursor-pointer"
               >
-                Uložit nastavení
+                {isSaving ? (
+                  <>
+                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                    Ukládám…
+                  </>
+                ) : (
+                  "Uložit nastavení"
+                )}
               </button>
-              
+
               {(apiKey || clientId) && (
                 <button
+                  type="button"
                   onClick={handleClearCustomSettings}
                   className="px-4 py-2.5 bg-slate-50 hover:bg-red-50 hover:text-red-600 text-slate-500 border border-slate-200 rounded-xl font-bold text-sm transition-colors cursor-pointer"
                 >
