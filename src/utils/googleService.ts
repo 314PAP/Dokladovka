@@ -13,6 +13,19 @@ interface GoogleDocItem {
 
 const DRIVE_ROOT_FOLDER_NAME = "Dokladovka";
 
+const CATEGORY_FOLDER_MAP: Record<string, string> = {
+  "zdravotni": "zdravotni",
+  "healthdoc": "zdravotni",
+  "pracovni_urad": "pracovni_urad",
+  "labor": "pracovni_urad",
+  "socialni_zabezpeceni": "socialni_zabezpeceni",
+  "socialdoc": "socialni_zabezpeceni",
+  "smlouvy": "smlouvy",
+  "contractdoc": "smlouvy",
+  "ostatni": "ostatni",
+  "otherdoc": "ostatni"
+};
+
 const ensureDriveFolder = async (accessToken: string, name: string, parentId?: string): Promise<string | null> => {
   const parentClause = parentId ? ` and '${parentId}' in parents` : "";
   const q = `name='${name.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false${parentClause}`;
@@ -56,9 +69,22 @@ export const ensureDokladovkaStructure = async (accessToken: string): Promise<st
   const rootId = await ensureDriveFolder(accessToken, DRIVE_ROOT_FOLDER_NAME);
   if (!rootId) return null;
 
-  const categoryFolders = ["dokumenty", "uctenky"];
+  const categoryFolders = ["zdravotni", "pracovni_urad", "socialni_zabezpeceni", "smlouvy", "ostatni"];
   for (const folder of categoryFolders) {
     await ensureDriveFolder(accessToken, folder, rootId);
+  }
+
+  const zdravotniId = await ensureDriveFolder(accessToken, "zdravotni", rootId);
+  if (zdravotniId) {
+    await ensureDriveFolder(accessToken, "porizene_obrazky", zdravotniId);
+  }
+
+  const dokumentyId = await ensureDriveFolder(accessToken, "dokumenty", rootId);
+  if (dokumentyId) {
+    const docCategories = ["zdravotni", "pracovni_urad", "socialni_zabezpeceni", "smlouvy", "ostatni"];
+    for (const cat of docCategories) {
+      await ensureDriveFolder(accessToken, cat, dokumentyId);
+    }
   }
 
   return rootId;
@@ -69,19 +95,13 @@ export const getDocumentCategoryFolderId = async (
   category: string,
   rootId: string
 ): Promise<string | null> => {
-  const normalized = category?.trim()?.toLowerCase() || "ostatni";
-  const folder = `dokumenty/${normalized}`;
-  const name = folder.split("/").pop() || "ostatni";
-  const parentPath = folder.includes("/") ? folder.slice(0, folder.lastIndexOf("/")) : undefined;
-  const parentId = parentPath
-    ? await ensureDriveFolder(
-        accessToken,
-        parentPath.split("/").pop() || parentPath,
-        rootId
-      )
-    : rootId;
+  const normalized = category?.trim()?.toLowerCase().replace(/\s+/g, "_") || "ostatni";
+  const mappedName = CATEGORY_FOLDER_MAP[normalized] || normalized;
 
-  return ensureDriveFolder(accessToken, name, parentId || undefined);
+  const dokumentyId = await ensureDriveFolder(accessToken, "dokumenty", rootId);
+  if (!dokumentyId) return null;
+
+  return ensureDriveFolder(accessToken, mappedName, dokumentyId);
 };
 
 const findExistingByName = async (
@@ -184,36 +204,41 @@ export const uploadDocumentImageToDrive = async (
 
 /**
  * Uploads a PDF blob directly to Google Drive via the multipart/related endpoint.
+ * Saves to 'Dokladovka/dokumenty/[category]' folder structure.
  */
 export async function uploadPdfToGoogleDrive(
   accessToken: string,
   pdfBlob: Blob,
-  fileName: string
+  fileName: string,
+  category?: string
 ): Promise<{ id: string; url: string }> {
+  const rootId = await ensureDokladovkaStructure(accessToken);
+  if (!rootId) throw new Error("Root folder Dokladovka missing");
+
+  const targetCategoryId = await getDocumentCategoryFolderId(accessToken, category || "Zdravotní", rootId);
+  if (!targetCategoryId) throw new Error("Category folder missing");
+
   const metadata = {
     name: fileName,
-    mimeType: "application/pdf"
+    mimeType: "application/pdf",
+    parents: [targetCategoryId]
   };
 
   const boundary = "-------314159265358979323846";
   const delimiter = `\r\n--${boundary}\r\n`;
   const close_delim = `\r\n--${boundary}--`;
 
-  // Read the PDF Blob as an ArrayBuffer
   const arrayBuffer = await pdfBlob.arrayBuffer();
   const bytes = new Uint8Array(arrayBuffer);
-  
-  // Construct body parts
+
   const metadataStr = JSON.stringify(metadata);
-  const header = 
+  const header =
     `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${metadataStr}${delimiter}Content-Type: application/pdf\r\n\r\n`;
   const footer = `\r\n${close_delim}`;
 
   const encoder = new TextEncoder();
   const headerBytes = encoder.encode(header);
   const footerBytes = encoder.encode(footer);
-
-  // Combine bytes securely
   const body = new Uint8Array(headerBytes.length + bytes.length + footerBytes.length);
   body.set(headerBytes, 0);
   body.set(bytes, headerBytes.length);
@@ -250,7 +275,6 @@ export async function createGoogleDocFromDocument(
   accessToken: string,
   docItem: GoogleDocItem
 ): Promise<{ id: string; url: string }> {
-  // 1. Create a blank Google Doc
   const createResponse = await fetch("https://docs.googleapis.com/v1/documents", {
     method: "POST",
     headers: {
@@ -270,13 +294,12 @@ export async function createGoogleDocFromDocument(
   const blankDoc = await createResponse.json();
   const documentId = blankDoc.documentId;
 
-  // 2. Format content rules
   let content = "";
   content += `${docItem.title.toUpperCase()}\n`;
   content += `Vystavitel: ${docItem.issuer}\n`;
   content += `Datum doložení: ${docItem.issueDate}\n`;
   content += `Kategorie: ${docItem.category}\n\n`;
-  
+
   if (docItem.summary) {
     content += `AI SHRNUTÍ OBSAHU\n`;
     content += `${docItem.summary}\n\n`;
@@ -289,7 +312,6 @@ export async function createGoogleDocFromDocument(
     });
   }
 
-  // 3. BatchUpdate to insert and format text beautifully
   const requests = [
     {
       insertText: {
@@ -297,7 +319,6 @@ export async function createGoogleDocFromDocument(
         text: content
       }
     },
-    // Set style for title
     {
       updateTextStyle: {
         range: {
@@ -390,16 +411,21 @@ export async function downloadUserDataFromGoogleDrive(
 
 /**
  * Saves/updates user data to 'dokladovka_sync_data.json' on Google Drive.
+ * Creates the folder structure on first save.
  */
 export async function saveUserDataToGoogleDrive(
   accessToken: string,
   data: { receipts: any[]; documents: any[] }
 ): Promise<string> {
-  // Try to find file first
+  const rootId = await ensureDokladovkaStructure(accessToken);
+  if (!rootId) throw new Error("Root folder Dokladovka missing");
+
+  const syncFolderId = await ensureDriveFolder(accessToken, "dokladovka_sync", rootId);
+  if (!syncFolderId) throw new Error("Sync folder missing");
+
   let fileId = await findSyncFile(accessToken);
-  
+
   if (!fileId) {
-    // Create new file metadata
     const createRes = await fetch("https://www.googleapis.com/drive/v3/files", {
       method: "POST",
       headers: {
@@ -408,7 +434,8 @@ export async function saveUserDataToGoogleDrive(
       },
       body: JSON.stringify({
         name: "dokladovka_sync_data.json",
-        mimeType: "application/json"
+        mimeType: "application/json",
+        parents: [syncFolderId]
       })
     });
     if (!createRes.ok) {
@@ -419,7 +446,6 @@ export async function saveUserDataToGoogleDrive(
     fileId = file.id;
   }
 
-  // Upload file content
   const uploadRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
     method: "PATCH",
     headers: {
@@ -436,4 +462,3 @@ export async function saveUserDataToGoogleDrive(
 
   return fileId!;
 }
-
