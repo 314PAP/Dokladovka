@@ -104,6 +104,19 @@ export const getDocumentCategoryFolderId = async (
   return ensureDriveFolder(accessToken, mappedName, dokumentyId);
 };
 
+export const getReceiptCategoryFolderId = async (
+  accessToken: string,
+  category: string,
+  rootId: string
+): Promise<string | null> => {
+  const normalized = category?.trim()?.toLowerCase().replace(/\s+/g, "_") || "ostatni";
+
+  const uctenkyId = await ensureDriveFolder(accessToken, "uctenky", rootId);
+  if (!uctenkyId) return null;
+
+  return ensureDriveFolder(accessToken, normalized, uctenkyId);
+};
+
 const findExistingByName = async (
   accessToken: string,
   name: string,
@@ -136,6 +149,87 @@ export const uploadDocumentImageToDrive = async (
 
   const safeTitle = (title || "dokument").replace(/[^a-zA-Z0-9áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\-_. ]+/g, "").trim() || "dokument";
   const datePart = issueDate ? issueDate.replace(/-/g, "") : new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const fileName = `${datePart}-${safeTitle}.jpg`;
+
+  const existingId = await findExistingByName(accessToken, fileName, categoryId);
+  if (existingId) {
+    return {
+      id: existingId,
+      url: `https://drive.google.com/file/d/${existingId}/view`
+    };
+  }
+
+  const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, "");
+  const binary = atob(base64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: "image/jpeg" });
+
+  const metadata = {
+    name: fileName,
+    mimeType: "image/jpeg",
+    parents: [categoryId]
+  };
+
+  const boundary = "-------314159265358979323846";
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const close_delim = `\r\n--${boundary}--`;
+
+  const metadataStr = JSON.stringify(metadata);
+  const header =
+    `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${metadataStr}${delimiter}Content-Type: image/jpeg\r\n\r\n`;
+  const footer = `\r\n${close_delim}`;
+
+  const encoder = new TextEncoder();
+  const headerBytes = encoder.encode(header);
+  const footerBytes = encoder.encode(footer);
+
+  const body = new Uint8Array(headerBytes.length + blob.size + footerBytes.length);
+  body.set(headerBytes, 0);
+  body.set(new Uint8Array(await blob.arrayBuffer()), headerBytes.length);
+  body.set(footerBytes, headerBytes.length + blob.size);
+
+  const response = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body
+    }
+  );
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Upload na Google Disk selhal: ${errText}`);
+  }
+
+  const data = await response.json();
+  return {
+    id: data.id,
+    url: `https://drive.google.com/file/d/${data.id}/view`
+  };
+};
+
+export const uploadReceiptImageToDrive = async (
+  accessToken: string,
+  base64Image: string,
+  title: string,
+  date: string,
+  category: string
+): Promise<{ id?: string; url?: string }> => {
+  const rootId = await ensureDokladovkaStructure(accessToken);
+  if (!rootId) throw new Error("Dokladovka root folder missing");
+
+  const categoryId = await getReceiptCategoryFolderId(accessToken, category, rootId);
+  if (!categoryId) throw new Error("Category folder missing");
+
+  const safeTitle = (title || "uctenka").replace(/[^a-zA-Z0-9áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\-_. ]+/g, "").trim() || "uctenka";
+  const datePart = date ? date.replace(/-/g, "") : new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const fileName = `${datePart}-${safeTitle}.jpg`;
 
   const existingId = await findExistingByName(accessToken, fileName, categoryId);

@@ -25,21 +25,8 @@ import { exportDocumentsToPDF } from '../utils/pdfExport';
 import { resizeAndCompressImage } from '../utils/imageCompressor';
 import { getSmartFallbackDocument } from '../utils/smartFallback';
 import { uploadPdfToGoogleDrive, createGoogleDocFromDocument, uploadDocumentImageToDrive, getDocumentCategoryFolderId } from '../utils/googleService';
-
-interface DocumentItem {
-  id: string;
-  title: string;
-  issuer: string;
-  issueDate: string;
-  category: string;
-  summary: string;
-  keyDetails: string[];
-  imageUrl?: string;
-  fileName?: string;
-  fileSize?: number;
-  isFallback?: boolean;
-  fallbackError?: string;
-}
+import { DocumentItem } from '../types';
+import FilePreview from '../components/FilePreview';
 
 interface DocQueueItem {
   id: string;
@@ -110,28 +97,6 @@ interface DocumentSectionProps {
   setDocuments: React.Dispatch<React.SetStateAction<DocumentItem[]>>;
 }
 
-function FilePreview({ file }: { file: File }) {
-  const [src, setSrc] = useState<string>('');
-  useEffect(() => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setSrc(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-  }, [file]);
-  
-  if (!src) {
-    return (
-      <div className="w-full h-40 bg-slate-100 flex items-center justify-center rounded-2xl border border-dashed border-slate-200">
-        <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
-      </div>
-    );
-  }
-  
-  return (
-    <img src={src} alt={file.name} className="w-full h-44 object-cover rounded-2xl border border-slate-200 shadow-sm animate-fade-in" referrerPolicy="no-referrer" />
-  );
-}
 
 export default function DocumentSection({ 
   onBack, 
@@ -327,73 +292,6 @@ export default function DocumentSection({
   const [docDate, setDocDate] = useState(new Date().toISOString().split('T')[0]);
   const [docSummary, setDocSummary] = useState('');
   const [docDetailsRaw, setDocDetailsRaw] = useState('');
-
-  // Helper to merge documents securely (avoid duplicates by ID)
-  const mergeDocuments = (local: DocumentItem[], server: DocumentItem[]) => {
-    const map = new Map<string, DocumentItem>();
-    local.forEach(d => map.set(d.id, d));
-    server.forEach(d => map.set(d.id, d));
-    return Array.from(map.values());
-  };
-
-  // Sync documents with backend on mount
-  useEffect(() => {
-    let active = true;
-    const syncDocuments = async () => {
-      try {
-        const response = await fetch("/api/db/documents");
-        if (response.ok && active) {
-          const serverDocs = await response.json();
-          if (Array.isArray(serverDocs)) {
-            setDocuments(prev => {
-              const merged = mergeDocuments(prev, serverDocs);
-              // Save merged list to localStorage
-              localStorage.setItem('smart-documents', JSON.stringify(merged));
-              // Save merged list back to backend to keep both strictly in sync
-              if (merged.length !== serverDocs.length || merged.length !== prev.length) {
-                fetch("/api/db/documents", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ documents: merged }),
-                }).catch(err => console.error("Failed to back-sync merged documents to backend", err));
-              }
-              return merged;
-            });
-          }
-        }
-      } catch (err) {
-        console.error("Failed to retrieve documents from backend database:", err);
-      }
-    };
-    syncDocuments();
-    return () => { active = false; };
-  }, []);
-
-  // Local storage & server-side persistence with safe quota catch and debounce
-  useEffect(() => {
-    try {
-      localStorage.setItem('smart-documents', JSON.stringify(documents));
-    } catch (e) {
-      console.warn("Storage quota exceeded. Storing text metadata locally to avoid page crash.", e);
-      try {
-        const textOnlyDocs = documents.map(d => ({ ...d, imageUrl: undefined }));
-        localStorage.setItem('smart-documents', JSON.stringify(textOnlyDocs));
-      } catch (err) {
-        console.error("Failsafe local storage write failed:", err);
-      }
-    }
-    
-    // Debounced server save to prevent massive concurrent requests during batch uploads
-    const timeoutId = setTimeout(() => {
-      fetch("/api/db/documents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ documents }),
-      }).catch(err => console.error("Error backing up documents to backend:", err));
-    }, 1200);
-
-    return () => clearTimeout(timeoutId);
-  }, [documents]);
 
   const filteredDocuments = useMemo(() => {
     return documents.filter(d => {

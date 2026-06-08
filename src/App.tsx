@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import DocumentSection from './components/DocumentSection';
+import FilePreview from './components/FilePreview';
 import GoogleSettings from './components/GoogleSettings';
 import { exportExpensesToPDF } from './utils/pdfExport';
 import { resizeAndCompressImage } from './utils/imageCompressor';
@@ -179,29 +180,6 @@ async function getCroppedImg(imageSrc: string, pixelCrop: Area): Promise<string>
   );
 
   return canvas.toDataURL('image/jpeg');
-}
-
-function FilePreview({ file }: { file: File }) {
-  const [src, setSrc] = useState<string>('');
-  useEffect(() => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setSrc(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-  }, [file]);
-  
-  if (!src) {
-    return (
-      <div className="w-full h-40 bg-slate-100 flex items-center justify-center rounded-2xl border border-dashed border-slate-200">
-        <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
-      </div>
-    );
-  }
-  
-  return (
-    <img src={src} alt={file.name} className="w-full h-44 object-cover rounded-2xl border border-slate-200 shadow-sm animate-fade-in" referrerPolicy="no-referrer" />
-  );
 }
 
 export default function App() {
